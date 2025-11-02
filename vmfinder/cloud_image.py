@@ -9,17 +9,6 @@ from pathlib import Path
 from typing import Optional, Dict
 
 
-# Cloud image URLs for different OS versions
-CLOUD_IMAGE_URLS = {
-    'ubuntu-20.04': 'https://cloud-images.ubuntu.com/focal/current/focal-server-cloudimg-amd64.img',
-    'ubuntu-22.04': 'https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img',
-    'ubuntu-24.04': 'https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img',
-    'debian-11': 'https://cdimage.debian.org/cdimage/cloud/bullseye/latest/debian-11-generic-amd64.qcow2',
-    'debian-12': 'https://cdimage.debian.org/cdimage/cloud/bookworm/latest/debian-12-generic-amd64.qcow2',
-    'debian-13': 'https://cdimage.debian.org/cdimage/cloud/trixie/latest/debian-13-generic-amd64.qcow2',
-}
-
-
 class CloudImageManager:
     """Manages cloud image downloads and caching."""
     
@@ -107,33 +96,29 @@ class CloudImageManager:
         except (PermissionError, OSError):
             pass
     
-    def get_cloud_image_url(self, template_name: str) -> Optional[str]:
-        """Get cloud image URL for a template."""
-        return CLOUD_IMAGE_URLS.get(template_name)
+    def get_cloud_image_url(self, template_data: Dict) -> Optional[str]:
+        """Get cloud image URL from template data."""
+        return template_data.get('cloud_image_url')
     
-    def get_cached_image_path(self, template_name: str) -> Path:
+    def get_cached_image_path(self, template_name: str, url: str) -> Path:
         """Get path to cached cloud image."""
-        url = self.get_cloud_image_url(template_name)
-        if not url:
-            raise ValueError(f"No cloud image URL for template: {template_name}")
-        
         # Use URL hash for filename to handle updates
         url_hash = hashlib.md5(url.encode()).hexdigest()[:8]
         filename = f"{template_name}-{url_hash}.qcow2"
         return self.cache_dir / filename
     
-    def download_cloud_image(self, template_name: str, echo_func=None) -> Path:
+    def download_cloud_image(self, template_name: str, template_data: Dict, echo_func=None) -> Path:
         """Download cloud image if not already cached."""
-        cached_path = self.get_cached_image_path(template_name)
+        url = self.get_cloud_image_url(template_data)
+        if not url:
+            raise ValueError(f"No cloud image URL in template: {template_name}")
+        
+        cached_path = self.get_cached_image_path(template_name, url)
         
         if cached_path.exists():
             if echo_func:
                 echo_func(f"Using cached cloud image: {cached_path}")
             return cached_path
-        
-        url = self.get_cloud_image_url(template_name)
-        if not url:
-            raise ValueError(f"No cloud image URL for template: {template_name}")
         
         if echo_func:
             echo_func(f"Downloading cloud image from {url}...")

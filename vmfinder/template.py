@@ -4,6 +4,8 @@ import yaml
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 
+from vmfinder.default_templates import DEFAULT_TEMPLATES
+
 
 class TemplateManager:
     """Manages VM templates for different OS versions."""
@@ -25,8 +27,21 @@ class TemplateManager:
             except Exception as e:
                 print(f"Warning: Failed to load template {template_file}: {e}")
     
+    def _version_key(self, version: str) -> tuple:
+        """Convert version string to a sortable tuple.
+        
+        Handles versions like "16.04", "20.04", "7", "38", etc.
+        """
+        try:
+            # Try to parse as decimal version (e.g., "16.04", "20.04")
+            parts = version.split('.')
+            return tuple(int(p) for p in parts)
+        except ValueError:
+            # Fallback to string comparison
+            return (float('inf'), version)
+    
     def list_templates(self) -> List[Dict[str, Any]]:
-        """List all available templates."""
+        """List all available templates, sorted by OS and version."""
         templates = []
         for name, template in self._templates.items():
             templates.append({
@@ -36,6 +51,9 @@ class TemplateManager:
                 'arch': template.get('arch', 'x86_64'),
                 'description': template.get('description', ''),
             })
+        
+        # Sort by OS first, then by version
+        templates.sort(key=lambda t: (t['os'], self._version_key(t['version'])))
         return templates
     
     def get_template(self, name: str) -> Optional[Dict[str, Any]]:
@@ -64,75 +82,6 @@ class TemplateManager:
         """Create default templates for common OS versions."""
         templates_dir.mkdir(parents=True, exist_ok=True)
         
-        default_templates = [
-            {
-                'name': 'ubuntu-20.04',
-                'os': 'ubuntu',
-                'version': '20.04',
-                'os_type': 'hvm',
-                'os_variant': 'ubuntu20.04',
-                'arch': 'x86_64',
-                'boot': 'hd',
-                'description': 'Ubuntu 20.04 LTS (Focal Fossa)',
-                'cloud_image_support': True,
-            },
-            {
-                'name': 'ubuntu-22.04',
-                'os': 'ubuntu',
-                'version': '22.04',
-                'os_type': 'hvm',
-                'os_variant': 'ubuntu22.04',
-                'arch': 'x86_64',
-                'boot': 'hd',
-                'description': 'Ubuntu 22.04 LTS (Jammy Jellyfish)',
-                'cloud_image_support': True,
-            },
-            {
-                'name': 'ubuntu-24.04',
-                'os': 'ubuntu',
-                'version': '24.04',
-                'os_type': 'hvm',
-                'os_variant': 'ubuntu24.04',
-                'arch': 'x86_64',
-                'boot': 'hd',
-                'description': 'Ubuntu 24.04 LTS (Noble Numbat)',
-                'cloud_image_support': True,
-            },
-            {
-                'name': 'debian-11',
-                'os': 'debian',
-                'version': '11',
-                'os_type': 'hvm',
-                'os_variant': 'debian11',
-                'arch': 'x86_64',
-                'boot': 'hd',
-                'description': 'Debian 11 (Bullseye)',
-                'cloud_image_support': True,
-            },
-            {
-                'name': 'debian-12',
-                'os': 'debian',
-                'version': '12',
-                'os_type': 'hvm',
-                'os_variant': 'debian12',
-                'arch': 'x86_64',
-                'boot': 'hd',
-                'description': 'Debian 12 (Bookworm)',
-                'cloud_image_support': True,
-            },
-            {
-                'name': 'debian-13',
-                'os': 'debian',
-                'version': '13',
-                'os_type': 'hvm',
-                'os_variant': 'debian13',
-                'arch': 'x86_64',
-                'boot': 'hd',
-                'description': 'Debian 13 (Trixie)',
-                'cloud_image_support': True,
-            },
-        ]
-        
         manager = TemplateManager(templates_dir)
-        for template in default_templates:
+        for template in DEFAULT_TEMPLATES:
             manager.create_template(template['name'], template)

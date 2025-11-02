@@ -71,8 +71,10 @@ def template_list(ctx):
 @click.option('--os-variant', help='OS variant for libvirt')
 @click.option('--arch', default='x86_64', help='Architecture')
 @click.option('--description', help='Template description')
+@click.option('--cloud-image-url', help='Cloud image URL for auto-install')
+@click.option('--cloud-image-support/--no-cloud-image-support', default=None, help='Enable/disable cloud image support')
 @click.pass_context
-def template_create(ctx, name, os, version, os_variant, arch, description):
+def template_create(ctx, name, os, version, os_variant, arch, description, cloud_image_url, cloud_image_support):
     """Create a new template."""
     config = ctx.obj['config']
     manager = TemplateManager(config.templates_dir)
@@ -86,6 +88,16 @@ def template_create(ctx, name, os, version, os_variant, arch, description):
         'boot': 'hd',
         'description': description or f"{os} {version}",
     }
+    
+    # Set cloud image support if specified or if URL is provided
+    if cloud_image_support is not None:
+        template['cloud_image_support'] = cloud_image_support
+    elif cloud_image_url:
+        template['cloud_image_support'] = True
+    
+    # Set cloud image URL if provided
+    if cloud_image_url:
+        template['cloud_image_url'] = cloud_image_url
     
     manager.create_template(name, template)
     click.echo(f"✓ Created template: {name}")
@@ -222,7 +234,8 @@ def vm_create(ctx, name, template, cpu, memory, disk_size, network, auto_install
             
             try:
                 cloud_image_path = cloud_manager.download_cloud_image(
-                    template, 
+                    template,
+                    template_data,
                     echo_func=lambda msg: click.echo(msg)
                 )
                 click.echo(f"Creating disk {disk_path} ({disk_size}GB) from cloud image...")
@@ -247,12 +260,76 @@ def vm_create(ctx, name, template, cpu, memory, disk_size, network, auto_install
         with VMManager(uri) as manager:
             manager.create_vm(name, template_data, disk_path, cpu, memory, network)
         
+        # If using cloud image, create and attach cloud-init ISO to avoid metadata service warnings
+        if use_cloud_image:
+            try:
+                click.echo(f"Creating cloud-init ISO for metadata service...")
+                storage_dir = config.get_storage_dir()
+                iso_path = storage_dir / f"{name}-cloud-init.iso"
+                
+                # Create a temporary ISO first to avoid permission issues
+                temp_iso = Path(tempfile.mktemp(suffix='.iso', dir=str(storage_dir)))
+                
+                try:
+                    # Create basic meta-data with instance-id and hostname
+                    meta_data = f"""instance-id: iid-{name}
+local-hostname: {name}
+"""
+                    
+                    # Create minimal user-data (just enable basic features)
+                    user_data = """#cloud-config
+# Basic cloud-init configuration to prevent network metadata service requests
+"""
+                    
+                    # Create the ISO
+                    CloudInitManager.create_cloud_init_iso(
+                        user_data,
+                        meta_data=meta_data,
+                        output_path=temp_iso
+                    )
+                    
+                    # Remove existing ISO if it exists
+                    if iso_path.exists():
+                        try:
+                            iso_path.unlink()
+                        except PermissionError:
+                            try:
+                                os.chmod(iso_path, 0o666)
+                                iso_path.unlink()
+                            except (PermissionError, OSError):
+                                pass
+                    
+                    # Move temp ISO to final location
+                    shutil.move(str(temp_iso), str(iso_path))
+                    
+                    # Set permissions for libvirt
+                    DiskManager.fix_disk_permissions(iso_path)
+                    
+                    # Attach ISO to VM
+                    click.echo(f"Attaching cloud-init ISO to VM...")
+                    CloudInitManager.attach_cloud_init_iso_to_vm(name, iso_path, uri)
+                    click.echo(f"✓ Cloud-init ISO attached")
+                except Exception as e:
+                    # If cloud-init ISO creation fails, continue anyway
+                    # The VM will still work, just with warnings about metadata service
+                    click.echo(f"Warning: Failed to create cloud-init ISO: {e}", err=True)
+                    click.echo(f"         VM will still work, but cloud-init may try to connect to metadata service.", err=True)
+                    # Clean up temp file on error
+                    if temp_iso.exists():
+                        try:
+                            temp_iso.unlink()
+                        except Exception:
+                            pass
+            except Exception as e:
+                # Don't fail VM creation if cloud-init setup fails
+                click.echo(f"Warning: Cloud-init setup failed: {e}", err=True)
+        
         click.echo(f"✓ VM '{name}' created successfully!")
         click.echo(f"\nTo start the VM, run: vmfinder vm start {name}")
         if use_cloud_image:
             click.echo(f"Note: OS is already installed. The VM should boot directly.")
             click.echo(f"Note: Default username is usually 'ubuntu' (Ubuntu) or 'debian' (Debian).")
-            click.echo(f"      You may need to set a password using cloud-init or console access.")
+            click.echo(f"      You may need to set a password using 'vmfinder vm set-password {name}' or console access.")
         elif not auto_install:
             click.echo(f"Note: You'll need to install an OS on the disk before starting.")
             click.echo(f"     Use virt-install or manually attach an ISO installer.")
@@ -410,6 +487,24 @@ def vm_info(ctx, name):
     config = ctx.obj['config']
     uri = config.get('libvirt_uri', 'qemu:///system')
     
+    def format_label_value(label, value, label_width=12):
+        """Format label:value with alignment."""
+        padded_label = label.ljust(label_width)
+        return f"{padded_label}: {value}"
+    
+    def get_state_color(state):
+        """Get color for VM state."""
+        state_colors = {
+            'running': 'green',
+            'shutoff': 'red',
+            'paused': 'yellow',
+            'pmsuspended': 'blue',
+            'in shutdown': 'yellow',
+            'crashed': 'red',
+            'pmsuspended disk': 'blue',
+        }
+        return state_colors.get(state.lower(), 'white')
+    
     try:
         with VMManager(uri) as manager:
             info = manager.get_vm_info(name)
@@ -417,15 +512,36 @@ def vm_info(ctx, name):
                 click.echo(f"Error: VM '{name}' not found.", err=True)
                 sys.exit(1)
             
-            click.echo(f"\nVM: {info['name']}")
-            click.echo(f"State: {info['state']}")
-            click.echo(f"CPU: {info['cpu']}")
-            click.echo(f"Memory: {info['memory']:.0f} MB")
-            click.echo(f"Max Memory: {info['max_memory']:.0f} MB")
-            click.echo(f"CPU Time: {info['cpu_time']:.2f} seconds")
+            # Calculate max label width for alignment
+            labels = ['VM', 'State', 'CPU', 'Memory', 'Max Memory', 'CPU Time']
+            max_label_width = max(len(label) for label in labels)
+            
+            # Format and display VM info with alignment and styling
+            vm_name = click.style(info['name'], bold=True)
+            click.echo(f"\n{format_label_value('VM', vm_name, max_label_width)}")
+            
+            state_text = info['state']
+            state_color = get_state_color(state_text)
+            styled_state = click.style(state_text, fg=state_color, bold=True)
+            click.echo(format_label_value('State', styled_state, max_label_width))
+            
+            cpu_value = click.style(str(info['cpu']), bold=True)
+            click.echo(format_label_value('CPU', cpu_value, max_label_width))
+            
+            memory_value = click.style(f"{info['memory']:.0f} MB", bold=True)
+            click.echo(format_label_value('Memory', memory_value, max_label_width))
+            
+            max_memory_value = click.style(f"{info['max_memory']:.0f} MB", bold=True)
+            click.echo(format_label_value('Max Memory', max_memory_value, max_label_width))
+            
+            click.echo(format_label_value('CPU Time', f"{info['cpu_time']:.2f} seconds", max_label_width))
             
             if info.get('disks'):
                 click.echo("\nDisks:")
+                # Calculate max disk label width for alignment
+                disk_labels = ['Format', 'Virtual Size', 'Actual Size', 'File Size']
+                disk_label_width = max(len(label) for label in disk_labels)
+                
                 for disk in info['disks']:
                     disk_source = disk.get('source')
                     disk_target = disk.get('target', 'unknown')
@@ -440,16 +556,16 @@ def vm_info(ctx, name):
                         
                         if is_iso:
                             # For ISO files, just show basic file info
-                            click.echo(f"  - {disk_target}: {disk_source} (ISO)")
+                            click.echo(f"  - {click.style(disk_target, bold=True)}: {disk_source} (ISO)")
                             if disk_path.exists():
                                 try:
                                     file_size = disk_path.stat().st_size
                                     size_mb = file_size / (1024 * 1024)
                                     size_gb = file_size / (1024 ** 3)
                                     if size_gb >= 1:
-                                        click.echo(f"    File Size: {size_gb:.2f} GB ({size_mb:.2f} MB)")
+                                        click.echo(f"    {format_label_value('File Size', f'{size_gb:.2f} GB ({size_mb:.2f} MB)', disk_label_width)}")
                                     else:
-                                        click.echo(f"    File Size: {size_mb:.2f} MB")
+                                        click.echo(f"    {format_label_value('File Size', f'{size_mb:.2f} MB', disk_label_width)}")
                                 except Exception:
                                     pass
                         else:
@@ -462,29 +578,29 @@ def vm_info(ctx, name):
                                 format_type = disk_info.get('format', 'unknown')
                                 
                                 # Display basic disk info
-                                click.echo(f"  - {disk_target}: {disk_source}")
-                                click.echo(f"    Format: {format_type}")
-                                click.echo(f"    Virtual Size: {virtual_size:.2f} GB")
-                                click.echo(f"    Actual Size: {actual_size:.2f} MB ({actual_size/1024:.2f} GB)")
+                                click.echo(f"  - {click.style(disk_target, bold=True)}: {disk_source}")
+                                click.echo(f"    {format_label_value('Format', format_type, disk_label_width)}")
+                                click.echo(f"    {format_label_value('Virtual Size', f'{virtual_size:.2f} GB', disk_label_width)}")
+                                click.echo(f"    {format_label_value('Actual Size', f'{actual_size:.2f} MB ({actual_size/1024:.2f} GB)', disk_label_width)}")
                             else:
                                 # Disk info unavailable
-                                click.echo(f"  - {disk_target}: {disk_source}")
+                                click.echo(f"  - {click.style(disk_target, bold=True)}: {disk_source}")
                                 if disk_path.exists():
                                     try:
                                         file_size = disk_path.stat().st_size
                                         size_mb = file_size / (1024 * 1024)
                                         size_gb = file_size / (1024 ** 3)
                                         if size_gb >= 1:
-                                            click.echo(f"    File Size: {size_gb:.2f} GB ({size_mb:.2f} MB)")
+                                            click.echo(f"    {format_label_value('File Size', f'{size_gb:.2f} GB ({size_mb:.2f} MB)', disk_label_width)}")
                                         else:
-                                            click.echo(f"    File Size: {size_mb:.2f} MB")
+                                            click.echo(f"    {format_label_value('File Size', f'{size_mb:.2f} MB', disk_label_width)}")
                                     except Exception:
                                         click.echo(f"    (unable to read disk information)")
                                 else:
                                     click.echo(f"    (file does not exist)")
                     else:
                         # Non-file disk (CD-ROM, etc.) - just show basic info
-                        click.echo(f"  - {disk_target}: {disk_source} ({disk_type})")
+                        click.echo(f"  - {click.style(disk_target, bold=True)}: {disk_source} ({disk_type})")
             
             if info.get('interfaces'):
                 click.echo("\nNetwork Interfaces:")
@@ -531,14 +647,22 @@ def vm_info(ctx, name):
                         pass  # If we can't get IPs, continue without them
                 
                 # Display interfaces with IP addresses if available
+                # Calculate max MAC address width for alignment (MAC addresses are 17 chars: XX:XX:XX:XX:XX:XX)
+                mac_width = 17  # Standard MAC address format length
+                
                 for iface in info['interfaces']:
                     mac = iface['mac'].lower() if iface.get('mac') else None
-                    iface_info = f"  - {iface['mac']}: {iface['source']} ({iface['type']})"
+                    mac_display = iface.get('mac', 'N/A')
+                    mac_styled = click.style(mac_display.ljust(mac_width), bold=True)
+                    
+                    iface_info = f"  - {mac_styled}: {iface['source']} ({iface['type']})"
                     
                     if mac and mac in mac_to_ips:
                         ip_addrs = mac_to_ips[mac]
                         if ip_addrs:
-                            iface_info += f" -> {', '.join(ip_addrs)}"
+                            ip_display = ', '.join(ip_addrs)
+                            ip_styled = click.style(ip_display, fg='cyan', bold=True)
+                            iface_info += f" -> {ip_styled}"
                     
                     click.echo(iface_info)
                 
@@ -555,6 +679,121 @@ def vm_info(ctx, name):
                         for ip in unmatched_ips:
                             click.echo(f"  - {ip}")
             
+    except Exception as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+
+
+@vm.command('fix-cloud-init')
+@click.argument('name')
+@click.option('--start/--no-start', default=False, help='Start VM after fixing cloud-init (default: no)')
+@click.pass_context
+def vm_fix_cloud_init(ctx, name, start):
+    """Fix cloud-init metadata service warnings by attaching a cloud-init ISO.
+    
+    This command creates and attaches a basic cloud-init ISO to prevent
+    cloud-init from trying to connect to network metadata services.
+    """
+    config = ctx.obj['config']
+    uri = config.get('libvirt_uri', 'qemu:///system')
+    
+    try:
+        # Check if VM exists
+        with VMManager(uri) as manager:
+            if not manager.vm_exists(name):
+                click.echo(f"Error: VM '{name}' not found.", err=True)
+                sys.exit(1)
+            
+            # Stop VM if running
+            was_running = False
+            try:
+                info = manager.get_vm_info(name)
+                if info and info['state'] == 'running':
+                    click.echo(f"Stopping VM '{name}'...")
+                    manager.stop_vm(name, force=True)
+                    click.echo(f"✓ VM stopped")
+                    was_running = True
+            except Exception as e:
+                click.echo(f"Warning: Could not stop VM: {e}", err=True)
+        
+        # Create cloud-init ISO
+        click.echo(f"Creating cloud-init ISO to fix metadata service warnings...")
+        storage_dir = config.get_storage_dir()
+        iso_path = storage_dir / f"{name}-cloud-init.iso"
+        
+        # Create ISO with a temporary name first to avoid permission issues
+        temp_iso = Path(tempfile.mktemp(suffix='.iso', dir=str(storage_dir)))
+        
+        try:
+            # Create basic meta-data with instance-id and hostname
+            meta_data = f"""instance-id: iid-{name}
+local-hostname: {name}
+"""
+            
+            # Create minimal user-data (just enable basic features)
+            user_data = """#cloud-config
+# Basic cloud-init configuration to prevent network metadata service requests
+"""
+            
+            # Create the ISO
+            CloudInitManager.create_cloud_init_iso(
+                user_data,
+                meta_data=meta_data,
+                output_path=temp_iso
+            )
+            
+            # Remove existing ISO if it exists (may be owned by libvirt-qemu)
+            if iso_path.exists():
+                try:
+                    iso_path.unlink()
+                except PermissionError:
+                    # Try to remove it using chmod
+                    try:
+                        os.chmod(iso_path, 0o666)
+                        iso_path.unlink()
+                    except (PermissionError, OSError):
+                        raise RuntimeError(
+                            f"Cannot remove existing ISO file {iso_path}. "
+                            f"It may be owned by libvirt-qemu. Remove it manually with: "
+                            f"sudo rm {iso_path}"
+                        )
+            
+            # Move temp ISO to final location
+            shutil.move(str(temp_iso), str(iso_path))
+        except Exception:
+            # Clean up temp file on error
+            if temp_iso.exists():
+                try:
+                    temp_iso.unlink()
+                except Exception:
+                    pass
+            raise
+        
+        # Set permissions for libvirt
+        DiskManager.fix_disk_permissions(iso_path)
+        
+        # Attach ISO to VM
+        click.echo(f"Attaching cloud-init ISO to VM...")
+        CloudInitManager.attach_cloud_init_iso_to_vm(name, iso_path, uri)
+        click.echo(f"✓ Cloud-init ISO attached")
+        
+        click.echo(f"\n✓ Cloud-init configuration fixed!")
+        click.echo(f"The VM will no longer try to connect to network metadata services.")
+        
+        # Start VM if it was running before (automatic) or if explicitly requested
+        if was_running:
+            click.echo(f"\nStarting VM '{name}' (was running before)...")
+            with VMManager(uri) as manager:
+                manager.start_vm(name)
+            click.echo(f"✓ VM started")
+            click.echo(f"\nThe metadata service warnings should be gone on next boot.")
+        elif start:
+            click.echo(f"\nStarting VM '{name}'...")
+            with VMManager(uri) as manager:
+                manager.start_vm(name)
+            click.echo(f"✓ VM started")
+            click.echo(f"\nThe metadata service warnings should be gone on next boot.")
+        
     except Exception as e:
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)

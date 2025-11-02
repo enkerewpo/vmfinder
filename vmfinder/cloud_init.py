@@ -155,25 +155,73 @@ disable_root: false
             xml_desc = dom.XMLDesc(0)
             root = ET.fromstring(xml_desc)
             
-            # Check if cloud-init ISO already attached
             devices = root.find('devices')
+            if devices is None:
+                devices = ET.SubElement(root, 'devices')
+            
+            # Normalize paths for comparison
+            iso_path_str = str(iso_path.resolve())
+            cloud_init_pattern = f"{vm_name}-cloud-init.iso"
+            
+            # Find all existing cloud-init ISO devices and remove them
+            # Also check for devices using 'hda' target that might conflict
+            disks_to_remove = []
+            existing_cloud_init_disk = None
+            
             for disk in devices.findall('disk'):
                 if disk.get('type') == 'file' and disk.get('device') == 'cdrom':
                     source = disk.find('source')
-                    if source is not None and 'cidata' in source.get('file', ''):
-                        # Already attached, update it
-                        source.set('file', str(iso_path))
-                        disk.find('target').set('dev', 'hda')
-                        # Update VM
-                        conn.defineXML(ET.tostring(root).decode())
-                        return
+                    if source is not None:
+                        source_file = source.get('file', '')
+                        source_file_normalized = str(Path(source_file).resolve()) if source_file else ''
+                        
+                        # Check if this is a cloud-init ISO (by filename pattern or 'cidata' in path)
+                        is_cloud_init = (
+                            cloud_init_pattern in source_file or
+                            'cidata' in source_file.lower() or
+                            '-cloud-init.iso' in source_file
+                        )
+                        
+                        if is_cloud_init:
+                            # If it's the same file, we can update it
+                            if source_file_normalized == iso_path_str:
+                                existing_cloud_init_disk = disk
+                            else:
+                                # Different cloud-init ISO, remove it
+                                disks_to_remove.append(disk)
+                        else:
+                            # Check if this CD-ROM device uses 'hda' target (conflict)
+                            target = disk.find('target')
+                            if target is not None and target.get('dev') == 'hda':
+                                # If it's not a cloud-init ISO but uses hda, we need to use a different target
+                                # For now, remove conflicting non-cloud-init CD-ROMs using hda
+                                # (This is rare, but can happen)
+                                if not source_file or 'cloud-init' not in source_file.lower():
+                                    disks_to_remove.append(disk)
             
-            # Add new CD-ROM device for cloud-init ISO
-            cdrom = ET.SubElement(devices, 'disk', type='file', device='cdrom')
-            driver = ET.SubElement(cdrom, 'driver', name='qemu', type='raw')
-            source = ET.SubElement(cdrom, 'source', file=str(iso_path))
-            target = ET.SubElement(cdrom, 'target', dev='hda', bus='ide')
-            readonly = ET.SubElement(cdrom, 'readonly')
+            # Remove old/conflicting disks
+            for disk in disks_to_remove:
+                devices.remove(disk)
+            
+            # Update existing device or create new one
+            if existing_cloud_init_disk is not None:
+                # Update existing cloud-init ISO device
+                source = existing_cloud_init_disk.find('source')
+                if source is not None:
+                    source.set('file', str(iso_path))
+                target = existing_cloud_init_disk.find('target')
+                if target is not None:
+                    target.set('dev', 'hda')
+                else:
+                    # Create target element if it doesn't exist
+                    target = ET.SubElement(existing_cloud_init_disk, 'target', dev='hda', bus='ide')
+            else:
+                # Add new CD-ROM device for cloud-init ISO
+                cdrom = ET.SubElement(devices, 'disk', type='file', device='cdrom')
+                driver = ET.SubElement(cdrom, 'driver', name='qemu', type='raw')
+                source = ET.SubElement(cdrom, 'source', file=str(iso_path))
+                target = ET.SubElement(cdrom, 'target', dev='hda', bus='ide')
+                readonly = ET.SubElement(cdrom, 'readonly')
             
             # Update VM configuration
             conn.defineXML(ET.tostring(root).decode())
