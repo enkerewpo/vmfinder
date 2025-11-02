@@ -3,7 +3,7 @@
 wheatfox
 
 ```bash
-vmfinder vm create rfuse_vm --template ubuntu-20.04 --cpu 4 --memory 4096 --disk-size 30 --force
+vmfinder vm create rfuse_vm --template ubuntu-20.04 --cpu 12 --memory 20480 --disk-size 30 --force
 vmfinder vm start rfuse_vm
 vmfinder vm list
 vmfinder vm suspend rfuse_vm

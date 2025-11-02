@@ -340,7 +340,109 @@ class VMManager:
         conn = self.connect()
         try:
             dom = conn.lookupByName(name)
-            # Need to update both live and config
+            
+            # Get current XML to check maxvcpu
+            xml_desc = dom.XMLDesc(0)
+            root = ET.fromstring(xml_desc)
+            vcpu_elem = root.find('vcpu')
+            
+            # Always fix placement='auto' to 'static' if present (numad may not be available)
+            placement_fixed = False
+            is_active = dom.isActive()  # Get this once before any changes
+            
+            if vcpu_elem is not None:
+                placement = vcpu_elem.get('placement')
+                if placement == 'auto':
+                    vcpu_elem.set('placement', 'static')
+                    placement_fixed = True
+            
+            # Also fix numatune/memory placement='auto' (this also triggers numad)
+            numatune = root.find('numatune')
+            if numatune is not None:
+                memory = numatune.find('memory')
+                if memory is not None and memory.get('placement') == 'auto':
+                    # Remove placement attribute instead of changing to 'static'
+                    # (static requires nodeset which we don't have)
+                    del memory.attrib['placement']
+                    placement_fixed = True
+            
+            # Update config if placement was fixed
+            if placement_fixed:
+                new_xml = ET.tostring(root, encoding='unicode')
+                if is_active:
+                    dom.undefineFlags(libvirt.VIR_DOMAIN_UNDEFINE_KEEP_NVRAM)
+                    conn.defineXML(new_xml)
+                    dom = conn.lookupByName(name)
+                else:
+                    dom.undefine()
+                    dom = conn.defineXML(new_xml)
+                # Re-read XML after fix
+                xml_desc = dom.XMLDesc(0)
+                root = ET.fromstring(xml_desc)
+                vcpu_elem = root.find('vcpu')
+            
+            # Check if we need to update maxvcpu
+            if vcpu_elem is not None:
+                # Get current max vcpu - it's either in the 'current' attribute or in the text
+                maxvcpu_attr = vcpu_elem.get('current')
+                maxvcpu_text = vcpu_elem.text
+                if maxvcpu_attr:
+                    maxvcpu = int(maxvcpu_attr)
+                elif maxvcpu_text:
+                    maxvcpu = int(maxvcpu_text.strip())
+                else:
+                    maxvcpu = 0
+                
+                # If requested CPU is greater than max, update max first
+                if cpu > maxvcpu:
+                    is_active = dom.isActive()
+                    
+                    # For running VM, maxvcpu cannot be increased without stopping
+                    if is_active:
+                        # Update the persistent config for next boot
+                        # Set maxvcpu in text, and current in attribute
+                        vcpu_elem.text = str(cpu)
+                        vcpu_elem.set('current', str(maxvcpu))  # Keep current at existing max
+                        
+                        # Change placement from 'auto' to 'static' if needed
+                        # 'auto' requires numad which may not be available
+                        placement = vcpu_elem.get('placement')
+                        if placement == 'auto':
+                            vcpu_elem.set('placement', 'static')
+                        
+                        # Update only the persistent config (will take effect after restart)
+                        new_xml = ET.tostring(root, encoding='unicode')
+                        dom.undefineFlags(libvirt.VIR_DOMAIN_UNDEFINE_KEEP_NVRAM)
+                        conn.defineXML(new_xml)
+                        
+                        # Cannot increase maxvcpu for running VM - raise error with clear message
+                        raise RuntimeError(
+                            f"Cannot increase CPU count from {maxvcpu} to {cpu} while VM is running. "
+                            f"Maximum vCPU count of a live domain cannot be modified. "
+                            f"Please stop the VM first with 'vmfinder vm stop {name}', "
+                            f"then run 'vmfinder vm set-cpu {name} {cpu}', "
+                            f"then start it again with 'vmfinder vm start {name}'. "
+                            f"The configuration has been updated for next boot."
+                        )
+                    else:
+                        # For stopped VM, we can freely update maxvcpu
+                        # Set maxvcpu in text, current in attribute (or same as max if not specified)
+                        vcpu_elem.text = str(cpu)
+                        vcpu_elem.set('current', str(cpu))
+                        
+                        # Change placement from 'auto' to 'static' if needed
+                        # 'auto' requires numad which may not be available
+                        placement = vcpu_elem.get('placement')
+                        if placement == 'auto':
+                            vcpu_elem.set('placement', 'static')
+                        # Keep 'static' or remove placement attribute for default behavior
+                        
+                        # Update the domain XML config
+                        new_xml = ET.tostring(root, encoding='unicode')
+                        dom.undefine()
+                        dom = conn.defineXML(new_xml)
+            
+            # Now set the CPU count
             if dom.isActive():
                 dom.setVcpusFlags(cpu, libvirt.VIR_DOMAIN_AFFECT_LIVE)
             dom.setVcpusFlags(cpu, libvirt.VIR_DOMAIN_AFFECT_CONFIG)

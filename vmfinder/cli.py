@@ -2,6 +2,9 @@
 
 import click
 import sys
+import os
+import tempfile
+import shutil
 from pathlib import Path
 from tabulate import tabulate
 
@@ -336,6 +339,43 @@ def vm_resume(ctx, name):
         sys.exit(1)
 
 
+@vm.command('restart')
+@click.argument('name')
+@click.option('--force', '-f', is_flag=True, help='Force stop (destroy) before restart')
+@click.pass_context
+def vm_restart(ctx, name, force):
+    """Restart a virtual machine (stop and start)."""
+    config = ctx.obj['config']
+    uri = config.get('libvirt_uri', 'qemu:///system')
+    
+    try:
+        with VMManager(uri) as manager:
+            # Check if VM is running
+            info = manager.get_vm_info(name)
+            if not info:
+                click.echo(f"Error: VM '{name}' not found.", err=True)
+                sys.exit(1)
+            
+            # Stop VM if running
+            if info['state'] == 'running':
+                click.echo(f"Stopping VM '{name}'...")
+                if manager.stop_vm(name, force):
+                    action = "destroyed" if force else "stopped"
+                    click.echo(f"✓ {action.capitalize()} VM: {name}")
+                else:
+                    click.echo(f"VM {name} is already stopped.")
+            
+            # Start VM
+            click.echo(f"Starting VM '{name}'...")
+            if manager.start_vm(name):
+                click.echo(f"✓ Started VM: {name}")
+            else:
+                click.echo(f"Warning: VM {name} may already be running or in an invalid state.")
+    except Exception as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+
+
 @vm.command('delete')
 @click.argument('name')
 @click.option('--delete-disk', is_flag=True, help='Also delete the disk image')
@@ -492,8 +532,40 @@ def vm_set_password(ctx, name, username, password, start):
         storage_dir = config.get_storage_dir()
         iso_path = storage_dir / f"{name}-cloud-init.iso"
         
-        user_data = CloudInitManager.create_password_config(username, password)
-        CloudInitManager.create_cloud_init_iso(user_data, output_path=iso_path)
+        # Create ISO with a temporary name first to avoid permission issues
+        # with existing files owned by libvirt-qemu
+        temp_iso = Path(tempfile.mktemp(suffix='.iso', dir=str(storage_dir)))
+        
+        try:
+            user_data = CloudInitManager.create_password_config(username, password)
+            CloudInitManager.create_cloud_init_iso(user_data, output_path=temp_iso)
+            
+            # Remove existing ISO if it exists (may be owned by libvirt-qemu)
+            if iso_path.exists():
+                try:
+                    iso_path.unlink()
+                except PermissionError:
+                    # Try to remove it using shutil which might handle it better
+                    try:
+                        os.chmod(iso_path, 0o666)
+                        iso_path.unlink()
+                    except (PermissionError, OSError):
+                        raise RuntimeError(
+                            f"Cannot remove existing ISO file {iso_path}. "
+                            f"It may be owned by libvirt-qemu. Remove it manually with: "
+                            f"sudo rm {iso_path}"
+                        )
+            
+            # Move temp ISO to final location
+            shutil.move(str(temp_iso), str(iso_path))
+        except Exception:
+            # Clean up temp file on error
+            if temp_iso.exists():
+                try:
+                    temp_iso.unlink()
+                except Exception:
+                    pass
+            raise
         
         # Set permissions for libvirt
         DiskManager.fix_disk_permissions(iso_path)

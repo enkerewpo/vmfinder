@@ -2,6 +2,7 @@
 
 import tempfile
 import subprocess
+import shutil
 from pathlib import Path
 from typing import Optional
 import os
@@ -43,29 +44,65 @@ local-hostname: cloudimg
             meta_data_path.write_text(meta_data)
             
             # Create ISO using genisoimage or mkisofs
-            try:
-                subprocess.run(
-                    ['genisoimage', '-output', str(output_path),
-                     '-volid', 'cidata', '-joliet', '-rock',
-                     str(user_data_path), str(meta_data_path)],
-                    check=True,
-                    capture_output=True
-                )
-            except (FileNotFoundError, subprocess.CalledProcessError):
-                # Try mkisofs as fallback
+            # Check for genisoimage first
+            genisoimage_cmd = shutil.which('genisoimage')
+            mkisofs_cmd = shutil.which('mkisofs')
+            
+            if genisoimage_cmd:
+                try:
+                    # Change to temp directory and create ISO from current directory
+                    subprocess.run(
+                        [genisoimage_cmd, '-o', str(output_path),
+                         '-volid', 'cidata', '-joliet', '-rock',
+                         'user-data', 'meta-data'],
+                        check=True,
+                        cwd=str(temp_path),
+                        capture_output=True,
+                        text=True
+                    )
+                except subprocess.CalledProcessError as e:
+                    # If genisoimage fails, try mkisofs
+                    if mkisofs_cmd:
+                        try:
+                            subprocess.run(
+                                [mkisofs_cmd, '-o', str(output_path),
+                                 '-V', 'cidata', '-J', '-r',
+                                 'user-data', 'meta-data'],
+                                check=True,
+                                cwd=str(temp_path),
+                                capture_output=True,
+                                text=True
+                            )
+                        except subprocess.CalledProcessError as e2:
+                            raise RuntimeError(
+                                f"Failed to create ISO with both genisoimage and mkisofs. "
+                                f"genisoimage error: {e.stderr}, mkisofs error: {e2.stderr}"
+                            )
+                    else:
+                        raise RuntimeError(
+                            f"genisoimage failed: {e.stderr}. "
+                            "mkisofs not found. Install with: sudo apt install genisoimage"
+                        )
+            elif mkisofs_cmd:
                 try:
                     subprocess.run(
-                        ['mkisofs', '-o', str(output_path),
+                        [mkisofs_cmd, '-o', str(output_path),
                          '-V', 'cidata', '-J', '-r',
-                         str(user_data_path), str(meta_data_path)],
+                         'user-data', 'meta-data'],
                         check=True,
-                        capture_output=True
+                        cwd=str(temp_path),
+                        capture_output=True,
+                        text=True
                     )
-                except (FileNotFoundError, subprocess.CalledProcessError):
+                except subprocess.CalledProcessError as e:
                     raise RuntimeError(
-                        "Neither genisoimage nor mkisofs found. "
-                        "Install with: sudo apt install genisoimage"
+                        f"Failed to create ISO with mkisofs: {e.stderr}"
                     )
+            else:
+                raise RuntimeError(
+                    "Neither genisoimage nor mkisofs found. "
+                    "Install with: sudo apt install genisoimage"
+                )
         
         return output_path
     
