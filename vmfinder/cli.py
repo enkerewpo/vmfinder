@@ -593,6 +593,90 @@ def vm_set_password(ctx, name, username, password, start):
         sys.exit(1)
 
 
+@vm.command('ssh')
+@click.argument('name')
+@click.option('--username', '-u', default='ubuntu', help='SSH username (default: ubuntu)')
+@click.option('--port', '-p', default=22, type=int, help='SSH port (default: 22)')
+@click.option('--key', '-k', help='SSH private key file path')
+@click.pass_context
+def vm_ssh(ctx, name, username, port, key):
+    """Show SSH connection information for a VM."""
+    config = ctx.obj['config']
+    uri = config.get('libvirt_uri', 'qemu:///system')
+    
+    try:
+        with VMManager(uri) as manager:
+            # Check if VM exists
+            if not manager.vm_exists(name):
+                click.echo(f"Error: VM '{name}' not found.", err=True)
+                sys.exit(1)
+            
+            # Get VM info
+            info = manager.get_vm_info(name)
+            if not info:
+                click.echo(f"Error: VM '{name}' not found.", err=True)
+                sys.exit(1)
+            
+            # Check if VM is running
+            if info['state'] != 'running':
+                click.echo(f"Warning: VM '{name}' is not running (state: {info['state']}).", err=True)
+                click.echo("Start the VM first with: vmfinder vm start " + name)
+                click.echo("\nOnce started, you can get IP address using:")
+                click.echo("  virsh domifaddr " + name)
+                sys.exit(1)
+            
+            # Get IP addresses
+            ip_addresses = manager.get_vm_ip_addresses(name)
+            
+            # Filter IPv4 addresses
+            ipv4_addresses = [ip_info for ip_info in ip_addresses if ip_info.get('type') == 'ipv4']
+            
+            if not ipv4_addresses:
+                click.echo(f"Could not determine IP address for VM '{name}'.", err=True)
+                click.echo("\nThe VM is running but IP address is not available yet.")
+                click.echo("This can happen if:")
+                click.echo("  - The VM is still booting (wait a few seconds)")
+                click.echo("  - The VM doesn't have network access")
+                click.echo("  - DHCP lease is not available")
+                click.echo("\nYou can try:")
+                click.echo(f"  virsh domifaddr {name}")
+                click.echo("\nOr connect via console:")
+                click.echo(f"  vmfinder vm console {name}")
+                sys.exit(1)
+            
+            # Use the first IPv4 address
+            ip_addr = ipv4_addresses[0]['ip']
+            
+            # Build SSH command
+            ssh_cmd_parts = ['ssh']
+            if key:
+                ssh_cmd_parts.extend(['-i', key])
+            if port != 22:
+                ssh_cmd_parts.extend(['-p', str(port)])
+            ssh_cmd_parts.append(f"{username}@{ip_addr}")
+            ssh_cmd = ' '.join(ssh_cmd_parts)
+            
+            click.echo(f"\nSSH connection information for VM '{name}':")
+            click.echo(f"  IP Address: {ip_addr}")
+            click.echo(f"  Username: {username}")
+            click.echo(f"  Port: {port}")
+            
+            if len(ipv4_addresses) > 1:
+                click.echo(f"\nOther IP addresses:")
+                for ip_info in ipv4_addresses[1:]:
+                    click.echo(f"  - {ip_info['ip']} ({ip_info.get('interface', 'unknown')})")
+            
+            click.echo(f"\nTo connect via SSH, run:")
+            click.echo(f"  {ssh_cmd}")
+            
+            click.echo(f"\nOr use the console (no IP needed):")
+            click.echo(f"  vmfinder vm console {name}")
+            
+    except Exception as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+
+
 @vm.command('fix-permissions')
 @click.argument('name')
 @click.pass_context

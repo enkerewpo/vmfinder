@@ -464,6 +464,76 @@ class VMManager:
         except libvirt.libvirtError as e:
             raise RuntimeError(f"Failed to set memory: {e}")
     
+    def get_vm_ip_addresses(self, name: str) -> List[Dict[str, str]]:
+        """Get IP addresses for a VM's network interfaces.
+        
+        Returns:
+            List of dicts with 'interface', 'ip', and 'type' keys
+        """
+        conn = self.connect()
+        ip_addresses = []
+        try:
+            dom = conn.lookupByName(name)
+            if not dom.isActive():
+                return ip_addresses  # VM not running, no IP addresses
+            
+            # Get interface addresses using libvirt API
+            # This works for active VMs
+            try:
+                ifaces = dom.interfaceAddresses(libvirt.VIR_DOMAIN_INTERFACE_ADDRESSES_SRC_LEASE)
+                if ifaces:
+                    for iface_name, iface_data in ifaces.items():
+                        addrs = iface_data.get('addrs', [])
+                        for addr in addrs:
+                            # addr['type'] is 0 for IPv4, 1 for IPv6
+                            addr_type = addr.get('type', -1)
+                            ip_type = 'ipv4' if addr_type == 0 else ('ipv6' if addr_type == 1 else 'unknown')
+                            ip_addr = addr.get('addr', '')
+                            if ip_addr:  # Only add if we have an actual IP
+                                ip_addresses.append({
+                                    'interface': iface_name,
+                                    'ip': ip_addr,
+                                    'type': ip_type,
+                                })
+            except (libvirt.libvirtError, AttributeError):
+                # Fallback: try using DHCP leases
+                pass
+            
+            # If no addresses found via API, try to get MAC and query network
+            if not ip_addresses:
+                xml_desc = dom.XMLDesc(0)
+                root = ET.fromstring(xml_desc)
+                for iface in root.findall('.//interface'):
+                    mac = iface.find('mac')
+                    if mac is not None:
+                        mac_addr = mac.get('address')
+                        # Try to get IP from network DHCP leases
+                        source = iface.find('source')
+                        if source is not None:
+                            network_name = source.get('network') or source.get('bridge')
+                            if network_name:
+                                # Query network for DHCP leases
+                                try:
+                                    net = conn.networkLookupByName(network_name)
+                                    # Get DHCP leases (requires libvirt 1.2.0+)
+                                    try:
+                                        leases = net.DHCPLeases()
+                                        for lease in leases:
+                                            if lease.get('mac') == mac_addr:
+                                                ip_addresses.append({
+                                                    'interface': mac_addr,
+                                                    'ip': lease.get('ipaddr', ''),
+                                                    'type': 'ipv4',
+                                                })
+                                    except (libvirt.libvirtError, AttributeError):
+                                        # DHCPLeases not available, skip
+                                        pass
+                                except libvirt.libvirtError:
+                                    pass
+        except libvirt.libvirtError:
+            pass
+        return ip_addresses
+    
     def get_console(self, name: str) -> Optional[str]:
         """Get console command for a VM."""
         conn = self.connect()
