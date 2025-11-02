@@ -7,6 +7,7 @@ import tempfile
 import shutil
 from pathlib import Path
 from tabulate import tabulate
+import libvirt
 
 from vmfinder.config import Config
 from vmfinder.vm_manager import VMManager
@@ -426,12 +427,133 @@ def vm_info(ctx, name):
             if info.get('disks'):
                 click.echo("\nDisks:")
                 for disk in info['disks']:
-                    click.echo(f"  - {disk['target']}: {disk['source']}")
+                    disk_source = disk.get('source')
+                    disk_target = disk.get('target', 'unknown')
+                    disk_type = disk.get('type', 'file')
+                    
+                    # Skip CD-ROM and other non-file disks for detailed info
+                    if disk_type == 'file' and disk_source:
+                        disk_path = Path(disk_source)
+                        
+                        # Check if it's an ISO file (cloud-init or CD-ROM)
+                        is_iso = disk_source.lower().endswith('.iso')
+                        
+                        if is_iso:
+                            # For ISO files, just show basic file info
+                            click.echo(f"  - {disk_target}: {disk_source} (ISO)")
+                            if disk_path.exists():
+                                try:
+                                    file_size = disk_path.stat().st_size
+                                    size_mb = file_size / (1024 * 1024)
+                                    size_gb = file_size / (1024 ** 3)
+                                    if size_gb >= 1:
+                                        click.echo(f"    File Size: {size_gb:.2f} GB ({size_mb:.2f} MB)")
+                                    else:
+                                        click.echo(f"    File Size: {size_mb:.2f} MB")
+                                except Exception:
+                                    pass
+                        else:
+                            # For disk images (qcow2, raw, etc.)
+                            disk_info = DiskManager.get_disk_info(disk_path)
+                            
+                            if disk_info:
+                                virtual_size = disk_info.get('virtual_size', 0)
+                                actual_size = disk_info.get('actual_size', 0)
+                                format_type = disk_info.get('format', 'unknown')
+                                
+                                # Display basic disk info
+                                click.echo(f"  - {disk_target}: {disk_source}")
+                                click.echo(f"    Format: {format_type}")
+                                click.echo(f"    Virtual Size: {virtual_size:.2f} GB")
+                                click.echo(f"    Actual Size: {actual_size:.2f} MB ({actual_size/1024:.2f} GB)")
+                            else:
+                                # Disk info unavailable
+                                click.echo(f"  - {disk_target}: {disk_source}")
+                                if disk_path.exists():
+                                    try:
+                                        file_size = disk_path.stat().st_size
+                                        size_mb = file_size / (1024 * 1024)
+                                        size_gb = file_size / (1024 ** 3)
+                                        if size_gb >= 1:
+                                            click.echo(f"    File Size: {size_gb:.2f} GB ({size_mb:.2f} MB)")
+                                        else:
+                                            click.echo(f"    File Size: {size_mb:.2f} MB")
+                                    except Exception:
+                                        click.echo(f"    (unable to read disk information)")
+                                else:
+                                    click.echo(f"    (file does not exist)")
+                    else:
+                        # Non-file disk (CD-ROM, etc.) - just show basic info
+                        click.echo(f"  - {disk_target}: {disk_source} ({disk_type})")
             
             if info.get('interfaces'):
                 click.echo("\nNetwork Interfaces:")
+                # Get IP addresses and create MAC to IP mapping if VM is running
+                mac_to_ips = {}
+                if info['state'] == 'running':
+                    try:
+                        conn = manager.connect()
+                        dom = conn.lookupByName(name)
+                        # Get interface addresses directly from libvirt
+                        try:
+                            ifaces = dom.interfaceAddresses(libvirt.VIR_DOMAIN_INTERFACE_ADDRESSES_SRC_LEASE)
+                            if ifaces:
+                                for iface_name, iface_data in ifaces.items():
+                                    mac = iface_data.get('hwaddr', '').lower()
+                                    if mac:
+                                        addrs = iface_data.get('addrs', [])
+                                        ipv4_addrs = []
+                                        for addr in addrs:
+                                            addr_type = addr.get('type', -1)
+                                            if addr_type == 0:  # IPv4
+                                                ip_addr = addr.get('addr', '')
+                                                if ip_addr:
+                                                    ipv4_addrs.append(ip_addr)
+                                        if ipv4_addrs:
+                                            mac_to_ips[mac] = ipv4_addrs
+                        except (libvirt.libvirtError, AttributeError):
+                            # Fallback to get_vm_ip_addresses method
+                            try:
+                                ip_addresses = manager.get_vm_ip_addresses(name)
+                                # Try to match by MAC if interface name contains MAC
+                                for ip_info in ip_addresses:
+                                    interface_name = ip_info.get('interface', '')
+                                    # Check if interface name is actually a MAC address
+                                    if ':' in interface_name and len(interface_name.split(':')) == 6:
+                                        mac_addr = interface_name.lower()
+                                        if ip_info.get('type') == 'ipv4':
+                                            if mac_addr not in mac_to_ips:
+                                                mac_to_ips[mac_addr] = []
+                                            mac_to_ips[mac_addr].append(ip_info['ip'])
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass  # If we can't get IPs, continue without them
+                
+                # Display interfaces with IP addresses if available
                 for iface in info['interfaces']:
-                    click.echo(f"  - {iface['mac']}: {iface['source']} ({iface['type']})")
+                    mac = iface['mac'].lower() if iface.get('mac') else None
+                    iface_info = f"  - {iface['mac']}: {iface['source']} ({iface['type']})"
+                    
+                    if mac and mac in mac_to_ips:
+                        ip_addrs = mac_to_ips[mac]
+                        if ip_addrs:
+                            iface_info += f" -> {', '.join(ip_addrs)}"
+                    
+                    click.echo(iface_info)
+                
+                # Show unmatched IP addresses if any
+                if mac_to_ips and info['state'] == 'running':
+                    displayed_macs = {iface['mac'].lower() for iface in info['interfaces'] if iface.get('mac')}
+                    unmatched_ips = []
+                    for mac, ips in mac_to_ips.items():
+                        if mac not in displayed_macs:
+                            unmatched_ips.extend(ips)
+                    
+                    if unmatched_ips:
+                        click.echo("\nAdditional IP Addresses:")
+                        for ip in unmatched_ips:
+                            click.echo(f"  - {ip}")
             
     except Exception as e:
         click.echo(f"Error: {e}", err=True)
@@ -736,6 +858,91 @@ def vm_fix_permissions(ctx, name):
                 sys.exit(1)
             else:
                 click.echo(f"✓ Permissions fixed successfully for VM '{name}'")
+    except Exception as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+
+
+@vm.command('resize-disk')
+@click.argument('name')
+@click.argument('size', type=int)
+@click.pass_context
+def vm_resize_disk(ctx, name, size):
+    """Resize a VM's disk image file.
+    
+    This command resizes the disk image file to the specified size (in GB).
+    After resizing, you need to manually expand the partition and filesystem inside the VM.
+    
+    The VM does not need to be stopped for disk resizing.
+    
+    Example:
+      vmfinder vm resize-disk myvm 50  # Resize to 50GB
+    
+    After resizing, SSH into the VM and run:
+      sudo growpart /dev/vda 1
+      sudo resize2fs /dev/vda1  (for ext4)
+      or: sudo xfs_growfs /  (for xfs)
+    """
+    config = ctx.obj['config']
+    uri = config.get('libvirt_uri', 'qemu:///system')
+    
+    try:
+        with VMManager(uri) as manager:
+            # Check if VM exists
+            info = manager.get_vm_info(name)
+            if not info:
+                click.echo(f"Error: VM '{name}' not found.", err=True)
+                sys.exit(1)
+            
+            # Get current disk info
+            disks = info.get('disks', [])
+            if not disks:
+                click.echo(f"Error: No disks found for VM '{name}'.", err=True)
+                sys.exit(1)
+            
+            # Get current disk size
+            disk_path_str = disks[0].get('source')
+            if not disk_path_str:
+                click.echo(f"Error: Could not determine disk path for VM '{name}'.", err=True)
+                sys.exit(1)
+            
+            disk_path = Path(disk_path_str)
+            current_info = DiskManager.get_disk_info(disk_path)
+            if current_info:
+                current_size = current_info['virtual_size']
+                click.echo(f"Current disk size: {current_size:.1f} GB")
+                if size <= current_size:
+                    click.echo(f"Error: New size ({size}GB) must be larger than current size ({current_size:.1f}GB).", err=True)
+                    sys.exit(1)
+            
+            click.echo(f"\nResizing disk for VM '{name}' to {size}GB...")
+            
+            # Resize the disk
+            result = manager.resize_vm_disk(name, size)
+            
+            if not result['success']:
+                click.echo(f"Error: Failed to resize disk: {result.get('message', 'Unknown error')}", err=True)
+                sys.exit(1)
+            
+            click.echo(f"✓ Disk image resized to {size}GB")
+            
+            click.echo(f"\n✓ Disk resize complete!")
+            click.echo("\nNote: The disk image has been resized, but you need to manually expand")
+            click.echo("      the partition and filesystem inside the VM.")
+            
+            disk_device = result.get('disk_device', '/dev/vda')
+            click.echo("\nTo expand the partition and filesystem inside the VM:")
+            step = 1
+            if info['state'] != 'running':
+                click.echo(f"  {step}. Start the VM: vmfinder vm start {name}")
+                step += 1
+            click.echo(f"  {step}. SSH into the VM: vmfinder vm ssh {name}")
+            step += 1
+            click.echo(f"  {step}. Run: sudo growpart {disk_device} 1")
+            step += 1
+            click.echo(f"  {step}. Run: sudo resize2fs {disk_device}1  (for ext4)")
+            click.echo(f"      or: sudo xfs_growfs /  (for xfs)")
+                
     except Exception as e:
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)

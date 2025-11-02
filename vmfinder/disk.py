@@ -1,6 +1,7 @@
 """Disk management for VMs."""
 
 import os
+import json
 import subprocess
 import grp
 from pathlib import Path
@@ -121,7 +122,6 @@ class DiskManager:
         
         try:
             result = subprocess.run(cmd, check=True, capture_output=True, text=True)
-            import json
             info = json.loads(result.stdout)
             return {
                 'format': info.get('format'),
@@ -156,14 +156,31 @@ class DiskManager:
     
     @staticmethod
     def resize_disk(disk_path: Path, size_gb: int) -> bool:
-        """Resize a disk image."""
+        """Resize a disk image.
+        
+        This only resizes the disk image file itself. After resizing,
+        you need to manually expand the partition and filesystem inside the VM.
+        """
         if not disk_path.exists():
             raise ValueError(f"Disk {disk_path} does not exist")
+        
+        # Get current size to check if we're expanding or shrinking
+        current_info = DiskManager.get_disk_info(disk_path)
+        if current_info:
+            current_size_gb = current_info['virtual_size']
+            if size_gb < current_size_gb:
+                raise ValueError(
+                    f"Cannot shrink disk from {current_size_gb:.1f}GB to {size_gb}GB. "
+                    f"Shrinking is not supported for data safety."
+                )
         
         cmd = ['qemu-img', 'resize', str(disk_path), f'{size_gb}G']
         
         try:
             subprocess.run(cmd, check=True, capture_output=True)
+            # Fix permissions after resize
+            DiskManager._set_libvirt_permissions(disk_path)
             return True
         except subprocess.CalledProcessError as e:
             raise RuntimeError(f"Failed to resize disk: {e.stderr.decode()}")
+    

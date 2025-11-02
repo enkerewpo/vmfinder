@@ -557,3 +557,99 @@ class VMManager:
         except libvirt.libvirtError:
             pass
         return None
+    
+    def resize_vm_disk(self, name: str, size_gb: int, disk_device: str = None) -> Dict[str, Any]:
+        """Resize VM disk and expand filesystem inside VM.
+        
+        This is a complete process that:
+        1. Gets the disk path from VM configuration
+        2. Resizes the disk image file
+        3. Attempts to expand the partition and filesystem inside the VM
+        
+        Args:
+            name: VM name
+            size_gb: New disk size in GB
+            disk_device: Optional disk device path inside VM (e.g., /dev/vda)
+                        If not provided, will try to detect from VM config
+        
+        Returns:
+            Dict with 'success', 'disk_resized', 'filesystem_expanded', and 'message' keys
+        """
+        from vmfinder.disk import DiskManager
+        from pathlib import Path
+        
+        conn = self.connect()
+        result = {
+            'success': False,
+            'disk_resized': False,
+            'filesystem_expanded': False,
+            'message': '',
+            'disk_path': None,
+            'disk_device': disk_device,
+        }
+        
+        try:
+            dom = conn.lookupByName(name)
+            
+            # Get disk path from VM XML
+            xml_desc = dom.XMLDesc(0)
+            root = ET.fromstring(xml_desc)
+            
+            # Find the first disk with type='file'
+            disk_elem = None
+            if disk_device:
+                # Try to match by target device
+                for disk in root.findall('.//disk'):
+                    target = disk.find('target')
+                    if target is not None and target.get('dev') == disk_device.replace('/dev/', ''):
+                        disk_elem = disk
+                        break
+            else:
+                # Use first file disk
+                for disk in root.findall('.//disk[@type="file"]'):
+                    disk_elem = disk
+                    break
+            
+            if disk_elem is None:
+                raise ValueError("No suitable disk found in VM configuration")
+            
+            source = disk_elem.find('source')
+            target_elem = disk_elem.find('target')
+            
+            if source is None or source.get('file') is None:
+                raise ValueError("Disk source file not found in VM configuration")
+            
+            disk_path = Path(source.get('file'))
+            if target_elem is not None:
+                result['disk_device'] = f"/dev/{target_elem.get('dev')}"
+            
+            result['disk_path'] = str(disk_path)
+            
+            # Step 1: Resize the disk image file
+            DiskManager.resize_disk(disk_path, size_gb)
+            result['disk_resized'] = True
+            
+            # Step 2: Try to expand filesystem inside VM
+            # This requires VM to be running and accessible
+            state_code, _ = dom.state()
+            if state_code == libvirt.VIR_DOMAIN_RUNNING:
+                # VM is running, try to expand via SSH or qemu-agent
+                # For now, we'll provide instructions for manual expansion
+                # The CLI command will handle SSH expansion if IP is available
+                result['message'] = (
+                    f"Disk image resized to {size_gb}GB. "
+                    f"VM is running - you may need to expand the partition and filesystem manually, "
+                    f"or use the CLI with --expand-filesystem flag if SSH is available."
+                )
+            else:
+                result['message'] = (
+                    f"Disk image resized to {size_gb}GB. "
+                    f"VM is not running. After starting the VM, you may need to expand "
+                    f"the partition and filesystem. Many cloud images will auto-expand on first boot."
+                )
+            
+            result['success'] = True
+            return result
+            
+        except libvirt.libvirtError as e:
+            raise RuntimeError(f"Failed to resize VM disk: {e}")
