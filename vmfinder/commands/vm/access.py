@@ -18,8 +18,8 @@ logger = get_logger()
 def cmd_vm_console(args):
     """Show console command for a virtual machine."""
     config = Config()
-    uri = config.get('libvirt_uri', 'qemu:///system')
-    
+    uri = config.get("libvirt_uri", "qemu:///system")
+
     try:
         with VMManager(uri) as manager:
             console_cmd = manager.get_console(args.name)
@@ -27,8 +27,12 @@ def cmd_vm_console(args):
                 print(f"To connect to console, run:")
                 print(f"  {console_cmd}")
                 print("\nTo exit console, press: Ctrl+]")
-                print("\nNote: If the VM doesn't have console configured, you can also use:")
-                print(f"  virsh -c {uri} vncdisplay {args.name}  # View VNC display info")
+                print(
+                    "\nNote: If the VM doesn't have console configured, you can also use:"
+                )
+                print(
+                    f"  virsh -c {uri} vncdisplay {args.name}  # View VNC display info"
+                )
             else:
                 print("Console not available for this VM.")
                 print(f"Try: virsh -c {uri} vncdisplay {args.name}")
@@ -40,35 +44,39 @@ def cmd_vm_console(args):
 def cmd_vm_ssh(args):
     """Show SSH connection information for a VM."""
     config = Config()
-    uri = config.get('libvirt_uri', 'qemu:///system')
-    
+    uri = config.get("libvirt_uri", "qemu:///system")
+
     try:
         with VMManager(uri) as manager:
             # Check if VM exists
             if not manager.vm_exists(args.name):
                 logger.error(f"VM '{args.name}' not found.")
                 sys.exit(1)
-            
+
             # Get VM info
             info = manager.get_vm_info(args.name)
             if not info:
                 logger.error(f"VM '{args.name}' not found.")
                 sys.exit(1)
-            
+
             # Check if VM is running
-            if info['state'] != 'running':
-                logger.warning(f"VM '{args.name}' is not running (state: {info['state']}).")
+            if info["state"] != "running":
+                logger.warning(
+                    f"VM '{args.name}' is not running (state: {info['state']})."
+                )
                 print("Start the VM first with: vmfinder vm start " + args.name)
                 print("\nOnce started, you can get IP address using:")
                 print("  virsh domifaddr " + args.name)
                 sys.exit(1)
-            
+
             # Get IP addresses
             ip_addresses = manager.get_vm_ip_addresses(args.name)
-            
+
             # Filter IPv4 addresses
-            ipv4_addresses = [ip_info for ip_info in ip_addresses if ip_info.get('type') == 'ipv4']
-            
+            ipv4_addresses = [
+                ip_info for ip_info in ip_addresses if ip_info.get("type") == "ipv4"
+            ]
+
             if not ipv4_addresses:
                 logger.error(f"Could not determine IP address for VM '{args.name}'.")
                 print("\nThe VM is running but IP address is not available yet.")
@@ -81,35 +89,37 @@ def cmd_vm_ssh(args):
                 print("\nOr connect via console:")
                 print(f"  vmfinder vm console {args.name}")
                 sys.exit(1)
-            
+
             # Use the first IPv4 address
-            ip_addr = ipv4_addresses[0]['ip']
-            
+            ip_addr = ipv4_addresses[0]["ip"]
+
             # Build SSH command
-            ssh_cmd_parts = ['ssh']
+            ssh_cmd_parts = ["ssh"]
             if args.key:
-                ssh_cmd_parts.extend(['-i', args.key])
+                ssh_cmd_parts.extend(["-i", args.key])
             if args.port != 22:
-                ssh_cmd_parts.extend(['-p', str(args.port)])
+                ssh_cmd_parts.extend(["-p", str(args.port)])
             ssh_cmd_parts.append(f"{args.username}@{ip_addr}")
-            ssh_cmd = ' '.join(ssh_cmd_parts)
-            
+            ssh_cmd = " ".join(ssh_cmd_parts)
+
             print(f"\nSSH connection information for VM '{args.name}':")
             print(f"  IP Address: {ip_addr}")
             print(f"  Username: {args.username}")
             print(f"  Port: {args.port}")
-            
+
             if len(ipv4_addresses) > 1:
                 print(f"\nOther IP addresses:")
                 for ip_info in ipv4_addresses[1:]:
-                    print(f"  - {ip_info['ip']} ({ip_info.get('interface', 'unknown')})")
-            
+                    print(
+                        f"  - {ip_info['ip']} ({ip_info.get('interface', 'unknown')})"
+                    )
+
             print(f"\nTo connect via SSH, run:")
             print(f"  {ssh_cmd}")
-            
+
             print(f"\nOr use the console (no IP needed):")
             print(f"  vmfinder vm console {args.name}")
-            
+
     except Exception as e:
         logger.error(f"Error: {e}")
         sys.exit(1)
@@ -118,8 +128,8 @@ def cmd_vm_ssh(args):
 def cmd_vm_set_password(args):
     """Set password for a VM using cloud-init."""
     config = Config()
-    uri = config.get('libvirt_uri', 'qemu:///system')
-    
+    uri = config.get("libvirt_uri", "qemu:///system")
+
     # Get password if not provided
     if not args.password:
         password = getpass.getpass("Password: ")
@@ -129,37 +139,38 @@ def cmd_vm_set_password(args):
             sys.exit(1)
     else:
         password = args.password
-    
+
     try:
         # Check if VM exists
         with VMManager(uri) as manager:
             if not manager.vm_exists(args.name):
                 logger.error(f"VM '{args.name}' not found.")
                 sys.exit(1)
-            
+
             # Stop VM if running
             try:
                 info = manager.get_vm_info(args.name)
-                if info and info['state'] == 'running':
+                if info and info["state"] == "running":
                     logger.info(f"Stopping VM '{args.name}'...")
                     manager.stop_vm(args.name, force=True)
                     logger.info(f"✓ VM stopped")
             except Exception as e:
                 logger.warning(f"Could not stop VM: {e}")
-        
+
         # Create cloud-init ISO
         logger.info(f"Creating cloud-init ISO for password setup...")
         storage_dir = config.get_storage_dir()
         iso_path = storage_dir / f"{args.name}-cloud-init.iso"
-        
+
         # Create ISO with a temporary name first to avoid permission issues
         import tempfile
-        temp_iso = Path(tempfile.mktemp(suffix='.iso', dir=str(storage_dir)))
-        
+
+        temp_iso = Path(tempfile.mktemp(suffix=".iso", dir=str(storage_dir)))
+
         try:
             user_data = CloudInitManager.create_password_config(args.username, password)
             CloudInitManager.create_cloud_init_iso(user_data, output_path=temp_iso)
-            
+
             # Remove existing ISO if it exists (may be owned by libvirt-qemu)
             if iso_path.exists():
                 try:
@@ -174,7 +185,7 @@ def cmd_vm_set_password(args):
                             f"It may be owned by libvirt-qemu. Remove it manually with: "
                             f"sudo rm {iso_path}"
                         )
-            
+
             # Move temp ISO to final location
             shutil.move(str(temp_iso), str(iso_path))
         except Exception:
@@ -185,15 +196,15 @@ def cmd_vm_set_password(args):
                 except Exception:
                     pass
             raise
-        
+
         # Set permissions for libvirt
         DiskManager.fix_disk_permissions(iso_path)
-        
+
         # Attach ISO to VM
         logger.info(f"Attaching cloud-init ISO to VM...")
         CloudInitManager.attach_cloud_init_iso_to_vm(args.name, iso_path, uri)
         logger.info(f"✓ Cloud-init ISO attached")
-        
+
         # Start VM if requested
         if args.start:
             logger.info(f"Starting VM '{args.name}'...")
@@ -206,8 +217,7 @@ def cmd_vm_set_password(args):
             print(f"\nYou can now login using:")
             print(f"  vmfinder vm console {args.name}")
             print(f"  # Then login with username: {args.username}")
-        
+
     except Exception as e:
         logger.error(f"Error: {e}")
         sys.exit(1)
-

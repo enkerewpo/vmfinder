@@ -5,9 +5,11 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "vmfinder"
 dynamic = ["version"]
-description = "A libvirt-based VM management tool for paper reproduction"
+description = "A libvirt-based VM management tool"
 readme = "README.md"
 requires-python = ">=3.8"
+license = {file = "LICENSE"}
+keywords = ["libvirt", "vm", "virtualization", "cloud", "virtualization management"]
 authors = [
     {name = "wheatfox", email = "wheatfox17@icloud.com"}
 ]
@@ -34,6 +36,12 @@ dependencies = [
 
 [project.scripts]
 vmfinder = "vmfinder.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/enkerewpo/vmfinder"
+Repository = "https://github.com/enkerewpo/vmfinder"
+Issues = "https://github.com/enkerewpo/vmfinder/issues"
+Documentation = "https://github.com/enkerewpo/vmfinder/blob/main/README.md"
 
 
 [tool.setuptools.packages.find]
