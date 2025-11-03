@@ -25,10 +25,11 @@ ssh -p 1234 ubuntu@<ip_address>
 vmfinder vm set-password rfuse_vm
 ```
 
-extfuse
-
 ```bash
+# extfuse
 vmfinder vm create extfuse_vm --template ubuntu-16.04 --cpu 12 --memory 20480 --disk-size 60 --force
+# cache_ext
+vmfinder vm create cache_vm --template ubuntu-22.04 --cpu 12 --memory 20480 --disk-size 60 --force
 ```
 
 copyright 2025 wheatfox
