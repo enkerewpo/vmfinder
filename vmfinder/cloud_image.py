@@ -4,9 +4,16 @@ import hashlib
 import os
 import subprocess
 import grp
-import urllib.request
 from pathlib import Path
 from typing import Optional, Dict
+
+try:
+    import requests
+
+    REQUESTS_AVAILABLE = True
+except ImportError:
+    REQUESTS_AVAILABLE = False
+    import urllib.request
 
 
 class CloudImageManager:
@@ -110,41 +117,131 @@ class CloudImageManager:
     def download_cloud_image(
         self, template_name: str, template_data: Dict, echo_func=None
     ) -> Path:
-        """Download cloud image if not already cached."""
+        """Download cloud image with resume support if not already cached."""
         url = self.get_cloud_image_url(template_data)
         if not url:
             raise ValueError(f"No cloud image URL in template: {template_name}")
 
         cached_path = self.get_cached_image_path(template_name, url)
+        temp_path = cached_path.with_suffix(cached_path.suffix + ".tmp")
 
         if cached_path.exists():
             if echo_func:
                 echo_func(f"Using cached cloud image: {cached_path}")
             return cached_path
 
+        # Check if there's a partial download
+        resume_pos = 0
+        if temp_path.exists():
+            resume_pos = temp_path.stat().st_size
+            if echo_func:
+                echo_func(f"Resuming download from {resume_pos} bytes...")
+
         if echo_func:
             echo_func(f"Downloading cloud image from {url}...")
-            echo_func("This may take a few minutes depending on your connection...")
-
-        # Download with progress
-        last_percent = [0]
-
-        def show_progress(block_num, block_size, total_size):
-            if total_size > 0:
-                percent = min(100, (block_num * block_size * 100) // total_size)
-                if percent != last_percent[0] and percent % 10 == 0 and echo_func:
-                    echo_func(f"Progress: {percent}%")
-                    last_percent[0] = percent
+            if resume_pos > 0:
+                echo_func(f"Resuming from {resume_pos:,} bytes...")
+            else:
+                echo_func("This may take a few minutes depending on your connection...")
 
         try:
-            urllib.request.urlretrieve(url, cached_path, reporthook=show_progress)
+            if REQUESTS_AVAILABLE:
+                # Use requests for better resume support
+                # Add browser-like headers to avoid 403 errors from some mirror sites
+                headers = {
+                    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                    "Accept": "*/*",
+                    "Accept-Language": "en-US,en;q=0.9",
+                    "Accept-Encoding": "identity",  # Don't use compression for binary files
+                    "Connection": "keep-alive",
+                }
+                if resume_pos > 0:
+                    headers["Range"] = f"bytes={resume_pos}-"
+
+                # Create a session for better connection handling
+                session = requests.Session()
+                session.headers.update(headers)
+
+                response = session.get(
+                    url, stream=True, timeout=30, allow_redirects=True
+                )
+                response.raise_for_status()
+
+                # Get total size if available
+                total_size = None
+                if "Content-Range" in response.headers:
+                    # Server supports range requests
+                    content_range = response.headers["Content-Range"]
+                    if "/" in content_range:
+                        total_size = int(content_range.split("/")[1])
+                elif "Content-Length" in response.headers:
+                    total_size = int(response.headers["Content-Length"])
+                    if resume_pos > 0:
+                        total_size += resume_pos
+
+                # Open file in append mode if resuming, otherwise create new
+                mode = "ab" if resume_pos > 0 else "wb"
+                with open(temp_path, mode) as f:
+                    downloaded = resume_pos
+                    last_percent = -1
+
+                    for chunk in response.iter_content(chunk_size=8192):
+                        if chunk:
+                            f.write(chunk)
+                            downloaded += len(chunk)
+
+                            # Show progress
+                            if total_size and echo_func:
+                                percent = min(100, (downloaded * 100) // total_size)
+                                if percent != last_percent and percent % 10 == 0:
+                                    echo_func(
+                                        f"Progress: {percent}% ({downloaded:,}/{total_size:,} bytes)"
+                                    )
+                                    last_percent = percent
+                            elif echo_func and downloaded % (10 * 1024 * 1024) == 0:
+                                # Show progress every 10MB if total size unknown
+                                echo_func(f"Downloaded: {downloaded:,} bytes...")
+
+                # Rename temp file to final name
+                temp_path.rename(cached_path)
+
+            else:
+                # Fallback to urllib (no resume support)
+                if resume_pos > 0:
+                    if echo_func:
+                        echo_func(
+                            "Warning: urllib doesn't support resume. Starting from beginning..."
+                        )
+                    temp_path.unlink()
+
+                last_percent = [0]
+
+                def show_progress(block_num, block_size, total_size):
+                    if total_size > 0:
+                        percent = min(100, (block_num * block_size * 100) // total_size)
+                        if (
+                            percent != last_percent[0]
+                            and percent % 10 == 0
+                            and echo_func
+                        ):
+                            echo_func(f"Progress: {percent}%")
+                            last_percent[0] = percent
+
+                urllib.request.urlretrieve(url, temp_path, reporthook=show_progress)
+                temp_path.rename(cached_path)
+
             if echo_func:
                 echo_func(f"✓ Downloaded cloud image: {cached_path}")
             return cached_path
+
         except Exception as e:
-            # Clean up partial download
-            if cached_path.exists():
-                cached_path.unlink()
+            # Keep partial download for resume
+            if temp_path.exists() and temp_path.stat().st_size > 0:
+                if echo_func:
+                    echo_func(
+                        f"Download interrupted. Partial file saved. "
+                        f"Run again to resume from {temp_path.stat().st_size:,} bytes."
+                    )
             raise RuntimeError(f"Failed to download cloud image: {e}")
 
     def create_disk_from_cloud_image(

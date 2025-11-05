@@ -8,6 +8,9 @@ from enum import Enum
 
 # Import disk manager for permission fixes
 from vmfinder.disk import DiskManager
+from vmfinder.logger import get_logger
+
+logger = get_logger()
 
 
 class VMState(Enum):
@@ -194,8 +197,22 @@ class VMManager:
         cpu: int = 2,
         memory_mb: int = 2048,
         network: str = "default",
+        virtiofs_mounts: Optional[List[Dict[str, Any]]] = None,
     ) -> bool:
-        """Create a new VM from template."""
+        """Create a new VM from template.
+
+        Args:
+            name: VM name
+            template: Template configuration dict
+            disk_path: Path to disk image
+            cpu: Number of CPUs
+            memory_mb: Memory in MB
+            network: Network name
+            virtiofs_mounts: List of virtio-fs mount configs, each with:
+                - source: host directory path
+                - mount_tag: mount tag name (default: "shared")
+                - socket_path: virtiofsd socket path
+        """
         conn = self.connect()
 
         # Check if VM already exists
@@ -206,7 +223,9 @@ class VMManager:
             pass  # VM doesn't exist, which is good
 
         # Generate XML from template
-        xml = self._generate_vm_xml(name, template, disk_path, cpu, memory_mb, network)
+        xml = self._generate_vm_xml(
+            name, template, disk_path, cpu, memory_mb, network, virtiofs_mounts
+        )
 
         try:
             dom = conn.defineXML(xml)
@@ -222,8 +241,19 @@ class VMManager:
         cpu: int,
         memory_mb: int,
         network: str,
+        virtiofs_mounts: Optional[List[Dict[str, Any]]] = None,
     ) -> str:
-        """Generate libvirt XML for a VM."""
+        """Generate libvirt XML for a VM.
+
+        Args:
+            name: VM name
+            template: Template configuration
+            disk_path: Disk image path
+            cpu: CPU count
+            memory_mb: Memory in MB
+            network: Network name
+            virtiofs_mounts: List of virtio-fs mount configs
+        """
         # OS type detection
         os_type = template.get("os_type", "hvm")
         os_variant = template.get("os_variant", "generic")
@@ -234,12 +264,58 @@ class VMManager:
         # Boot device
         boot_dev = template.get("boot", "hd")
 
+        # Build devices XML
+        devices_xml = f"""    <disk type='file' device='disk'>
+      <driver name='qemu' type='qcow2'/>
+      <source file='{disk_path}'/>
+      <target dev='vda' bus='virtio'/>
+    </disk>
+    <interface type='network'>
+      <source network='{network}'/>
+      <model type='virtio'/>
+    </interface>"""
+
+        # Add virtio-fs filesystems if provided
+        if virtiofs_mounts:
+            for mount in virtiofs_mounts:
+                mount_tag = mount.get("mount_tag", "shared")
+                socket_path = mount.get("socket_path", "")
+
+                if not socket_path:
+                    raise ValueError("virtio-fs mount requires socket_path")
+
+                devices_xml += f"""
+    <filesystem type='mount' accessmode='passthrough'>
+      <driver type='virtiofs'/>
+      <source socket='{socket_path}'/>
+      <target dir='{mount_tag}'/>
+      <alias name='fs-{mount_tag}'/>
+    </filesystem>"""
+
+        devices_xml += """
+    <console type='pty'>
+      <target type='serial' port='0'/>
+    </console>
+    <graphics type='vnc' port='-1' autoport='yes' listen='127.0.0.1'/>
+    <video>
+      <model type='cirrus' vram='9216' heads='1'/>
+    </video>"""
+
+        # Add shared memory configuration if virtio-fs is used
+        memory_backing_xml = ""
+        if virtiofs_mounts:
+            memory_backing_xml = """  <memoryBacking>
+    <source type='memfd'/>
+    <access mode='shared'/>
+  </memoryBacking>
+"""
+
         xml = f"""<domain type='kvm'>
   <name>{name}</name>
   <memory unit='MiB'>{memory_mb}</memory>
   <currentMemory unit='MiB'>{memory_mb}</currentMemory>
   <vcpu placement='static'>{cpu}</vcpu>
-  <os>
+{memory_backing_xml}  <os>
     <type arch='{arch}'>{os_type}</type>
     <boot dev='{boot_dev}'/>
   </os>
@@ -254,22 +330,7 @@ class VMManager:
   <on_reboot>restart</on_reboot>
   <on_crash>restart</on_crash>
   <devices>
-    <disk type='file' device='disk'>
-      <driver name='qemu' type='qcow2'/>
-      <source file='{disk_path}'/>
-      <target dev='vda' bus='virtio'/>
-    </disk>
-    <interface type='network'>
-      <source network='{network}'/>
-      <model type='virtio'/>
-    </interface>
-    <console type='pty'>
-      <target type='serial' port='0'/>
-    </console>
-    <graphics type='vnc' port='-1' autoport='yes' listen='127.0.0.1'/>
-    <video>
-      <model type='cirrus' vram='9216' heads='1'/>
-    </video>
+{devices_xml}
   </devices>
 </domain>"""
         return xml
@@ -690,3 +751,167 @@ class VMManager:
 
         except libvirt.libvirtError as e:
             raise RuntimeError(f"Failed to resize VM disk: {e}")
+
+    def add_virtiofs_device(
+        self,
+        name: str,
+        socket_path: str,
+        mount_tag: str = "shared",
+    ) -> bool:
+        """Add a virtio-fs device to an existing VM.
+
+        Args:
+            name: VM name
+            socket_path: Path to virtiofsd socket
+            mount_tag: Mount tag name (default: "shared")
+
+        Returns:
+            True if added successfully
+        """
+        conn = self.connect()
+        try:
+            dom = conn.lookupByName(name)
+            is_active = dom.isActive()
+
+            # Get current XML
+            xml_desc = dom.XMLDesc(
+                libvirt.VIR_DOMAIN_XML_INACTIVE if not is_active else 0
+            )
+            root = ET.fromstring(xml_desc)
+
+            # Check if device with same mount_tag already exists
+            devices = root.find("devices")
+            if devices is None:
+                raise ValueError("VM XML missing devices section")
+
+            for fs in devices.findall(".//filesystem"):
+                target = fs.find("target")
+                if target is not None and target.get("dir") == mount_tag:
+                    raise ValueError(
+                        f"virtio-fs device with mount_tag '{mount_tag}' already exists"
+                    )
+
+            # Add new filesystem device
+            fs_elem = ET.SubElement(
+                devices, "filesystem", type="mount", accessmode="passthrough"
+            )
+            driver = ET.SubElement(fs_elem, "driver", type="virtiofs")
+            source = ET.SubElement(fs_elem, "source", socket=socket_path)
+            target = ET.SubElement(fs_elem, "target", dir=mount_tag)
+            alias = ET.SubElement(fs_elem, "alias", name=f"fs-{mount_tag}")
+
+            # Update VM configuration
+            new_xml = ET.tostring(root).decode()
+
+            if is_active:
+                # Update live config
+                dom.undefineFlags(libvirt.VIR_DOMAIN_UNDEFINE_KEEP_NVRAM)
+                conn.defineXML(new_xml)
+                # Reattach device (requires domain restart or device attach)
+                # For now, we'll just update the config and user needs to restart
+                logger.warning(
+                    f"virtio-fs device added to config. "
+                    f"VM needs to be restarted for changes to take effect."
+                )
+            else:
+                # Update inactive config
+                dom.undefine()
+                conn.defineXML(new_xml)
+
+            return True
+
+        except libvirt.libvirtError as e:
+            raise RuntimeError(f"Failed to add virtio-fs device: {e}")
+
+    def remove_virtiofs_device(self, name: str, mount_tag: str) -> bool:
+        """Remove a virtio-fs device from a VM.
+
+        Args:
+            name: VM name
+            mount_tag: Mount tag name to remove
+
+        Returns:
+            True if removed successfully
+        """
+        conn = self.connect()
+        try:
+            dom = conn.lookupByName(name)
+            is_active = dom.isActive()
+
+            # Get current XML
+            xml_desc = dom.XMLDesc(
+                libvirt.VIR_DOMAIN_XML_INACTIVE if not is_active else 0
+            )
+            root = ET.fromstring(xml_desc)
+
+            devices = root.find("devices")
+            if devices is None:
+                raise ValueError("VM XML missing devices section")
+
+            # Find and remove filesystem with matching mount_tag
+            found = False
+            for fs in devices.findall(".//filesystem"):
+                target = fs.find("target")
+                if target is not None and target.get("dir") == mount_tag:
+                    devices.remove(fs)
+                    found = True
+                    break
+
+            if not found:
+                raise ValueError(
+                    f"virtio-fs device with mount_tag '{mount_tag}' not found"
+                )
+
+            # Update VM configuration
+            new_xml = ET.tostring(root).decode()
+
+            if is_active:
+                # Update live config
+                dom.undefineFlags(libvirt.VIR_DOMAIN_UNDEFINE_KEEP_NVRAM)
+                conn.defineXML(new_xml)
+                logger.warning(
+                    f"virtio-fs device removed from config. "
+                    f"VM needs to be restarted for changes to take effect."
+                )
+            else:
+                # Update inactive config
+                dom.undefine()
+                conn.defineXML(new_xml)
+
+            return True
+
+        except libvirt.libvirtError as e:
+            raise RuntimeError(f"Failed to remove virtio-fs device: {e}")
+
+    def list_virtiofs_devices(self, name: str) -> List[Dict[str, str]]:
+        """List virtio-fs devices for a VM.
+
+        Args:
+            name: VM name
+
+        Returns:
+            List of dicts with 'mount_tag' and 'socket_path' keys
+        """
+        conn = self.connect()
+        devices = []
+        try:
+            dom = conn.lookupByName(name)
+            xml_desc = dom.XMLDesc(0)
+            root = ET.fromstring(xml_desc)
+
+            for fs in root.findall(".//filesystem[@type='mount']"):
+                driver = fs.find("driver")
+                if driver is not None and driver.get("type") == "virtiofs":
+                    target = fs.find("target")
+                    source = fs.find("source")
+                    if target is not None and source is not None:
+                        devices.append(
+                            {
+                                "mount_tag": target.get("dir", ""),
+                                "socket_path": source.get("socket", ""),
+                            }
+                        )
+        except libvirt.libvirtError:
+            pass
+
+        return devices

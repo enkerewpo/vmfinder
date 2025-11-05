@@ -57,3 +57,37 @@ def cmd_template_create(args):
 
     manager.create_template(args.name, template)
     logger.info(f"✓ Created template: {args.name}")
+
+
+def cmd_template_update(args):
+    """Update templates to default templates."""
+    config = Config()
+    manager = TemplateManager(config.templates_dir)
+
+    # Get current templates
+    current_templates = manager.list_templates()
+    current_names = {t["name"] for t in current_templates}
+
+    # Update all default templates
+    from vmfinder.default_templates import DEFAULT_TEMPLATES
+
+    updated_count = 0
+    created_count = 0
+
+    for template in DEFAULT_TEMPLATES:
+        template_name = template["name"]
+        if template_name in current_names:
+            # Update existing template
+            manager.create_template(template_name, template)
+            updated_count += 1
+            logger.info(f"✓ Updated template: {template_name}")
+        else:
+            # Create new template
+            manager.create_template(template_name, template)
+            created_count += 1
+            logger.info(f"✓ Created template: {template_name}")
+
+    logger.info(
+        f"\n✓ Template update complete: {updated_count} updated, "
+        f"{created_count} created, {len(DEFAULT_TEMPLATES)} total"
+    )

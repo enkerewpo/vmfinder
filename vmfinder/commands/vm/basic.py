@@ -1,10 +1,12 @@
 """Basic VM operations: list, start, stop, suspend, resume, restart."""
 
 import sys
+from pathlib import Path
 from tabulate import tabulate
 
 from vmfinder.config import Config
 from vmfinder.vm_manager import VMManager
+from vmfinder.virtiofsd import VirtiofsdManager
 from vmfinder.logger import get_logger
 
 logger = get_logger()
@@ -58,6 +60,60 @@ def cmd_vm_start(args):
     uri = config.get("libvirt_uri", "qemu:///system")
 
     try:
+        # Check for virtio-fs devices and start virtiofsd if needed
+        with VMManager(uri) as manager:
+            virtiofs_devices = manager.list_virtiofs_devices(args.name)
+
+            if virtiofs_devices:
+                virtiofs_manager = VirtiofsdManager(config.config_dir)
+
+                # Check if virtiofsd is already running
+                if not virtiofs_manager.is_running(args.name):
+                    # Get source path from state
+                    status = virtiofs_manager.get_status(args.name)
+                    if status:
+                        source_path = Path(status.get("source_path", ""))
+                        mount_tag = status.get("mount_tag", "shared")
+
+                        if source_path.exists():
+                            logger.info(f"Starting virtiofsd for VM '{args.name}'...")
+                            virtiofs_manager.start_virtiofsd(
+                                vm_name=args.name,
+                                source_path=source_path,
+                                mount_tag=mount_tag,
+                            )
+                        else:
+                            socket_path = virtiofs_devices[0].get("socket_path", "")
+                            logger.error(
+                                f"virtio-fs source path not found: {source_path}. "
+                                f"Cannot start virtiofsd."
+                            )
+                            logger.error(
+                                f"\nPlease start virtiofsd manually with:"
+                                f"\n  vmfinder virtiofs start {args.name} <source_directory_path>"
+                            )
+                            if socket_path:
+                                logger.error(f"\nExpected socket path: {socket_path}")
+                            sys.exit(1)
+                    else:
+                        # State not found - need to start manually
+                        socket_path = virtiofs_devices[0].get("socket_path", "")
+                        logger.error(
+                            f"virtio-fs configured but virtiofsd state not found. "
+                            f"Cannot start VM without virtiofsd running."
+                        )
+                        logger.error(
+                            f"\nPlease start virtiofsd manually with:"
+                            f"\n  vmfinder virtiofs start {args.name} <source_directory_path>"
+                        )
+                        if socket_path:
+                            logger.error(f"\nExpected socket path: {socket_path}")
+                        logger.error(
+                            f"\nThen run this command again: vmfinder vm start {args.name}"
+                        )
+                        sys.exit(1)
+
+        # Start the VM
         with VMManager(uri) as manager:
             if manager.start_vm(args.name):
                 logger.info(f"✓ Started VM: {args.name}")
@@ -76,12 +132,20 @@ def cmd_vm_stop(args):
     uri = config.get("libvirt_uri", "qemu:///system")
 
     try:
+        # Stop the VM first
         with VMManager(uri) as manager:
             if manager.stop_vm(args.name, args.force):
                 action = "destroyed" if args.force else "stopped"
                 logger.info(f"✓ {action.capitalize()} VM: {args.name}")
             else:
                 logger.warning(f"VM {args.name} is already stopped.")
+
+        # Stop virtiofsd if it's running
+        virtiofs_manager = VirtiofsdManager(config.config_dir)
+        if virtiofs_manager.is_running(args.name):
+            logger.info(f"Stopping virtiofsd for VM '{args.name}'...")
+            virtiofs_manager.stop_virtiofsd(args.name, force=args.force)
+
     except Exception as e:
         logger.error(f"Error: {e}")
         sys.exit(1)

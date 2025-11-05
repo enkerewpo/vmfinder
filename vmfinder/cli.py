@@ -34,6 +34,7 @@ from vmfinder.completion import (
 from vmfinder.commands import init as cmd_init
 from vmfinder.commands import template as cmd_template
 from vmfinder.commands import install_completion as cmd_install_completion
+from vmfinder.commands import virtiofs as cmd_virtiofs
 from vmfinder.commands.vm import (
     cmd_vm_list,
     cmd_vm_start,
@@ -170,6 +171,11 @@ def create_parser():
     )
     parser_template_list.set_defaults(func=cmd_template.cmd_template_list)
 
+    parser_template_update = template_subparsers.add_parser(
+        "update", help="Update templates to default templates"
+    )
+    parser_template_update.set_defaults(func=cmd_template.cmd_template_update)
+
     parser_template_create = template_subparsers.add_parser(
         "create", help="Create a new template"
     )
@@ -246,6 +252,15 @@ def create_parser():
         "-f",
         action="store_true",
         help="Force overwrite existing VM without prompting",
+    )
+    parser_vm_create.add_argument(
+        "--virtiofs",
+        help="Mount host directory via virtio-fs (path to host directory)",
+    )
+    parser_vm_create.add_argument(
+        "--virtiofs-tag",
+        default="shared",
+        help="Mount tag name for virtio-fs (default: shared)",
     )
     parser_vm_create.set_defaults(func=cmd_vm_create)
 
@@ -435,6 +450,80 @@ def create_parser():
         vm_resize_name.completer = complete_vm_name
     parser_vm_resize_disk.add_argument("size", type=int, help="New disk size in GB")
     parser_vm_resize_disk.set_defaults(func=cmd_vm_resize_disk)
+
+    # virtiofs commands
+    parser_virtiofs = subparsers.add_parser("virtiofs", help="Manage virtio-fs daemons")
+    virtiofs_subparsers = parser_virtiofs.add_subparsers(
+        dest="virtiofs_command", help="VirtioFS commands"
+    )
+
+    # virtiofs start
+    parser_virtiofs_start = virtiofs_subparsers.add_parser(
+        "start", help="Start virtiofsd for a VM"
+    )
+    virtiofs_start_name = parser_virtiofs_start.add_argument("name", help="VM name")
+    if ARGCOMPLETE_AVAILABLE:
+        virtiofs_start_name.completer = complete_vm_name
+    parser_virtiofs_start.add_argument(
+        "source",
+        nargs="?",
+        help="Host directory path to share (optional if state exists)",
+    )
+    parser_virtiofs_start.add_argument(
+        "--tag", default="shared", help="Mount tag name (default: shared)"
+    )
+    parser_virtiofs_start.add_argument(
+        "--cache",
+        choices=["none", "auto", "always"],
+        default="auto",
+        help="Cache mode (default: auto)",
+    )
+    parser_virtiofs_start.add_argument(
+        "--xattr",
+        choices=["off", "on", "auto"],
+        default="auto",
+        help="Extended attributes mode (default: auto)",
+    )
+    parser_virtiofs_start.add_argument(
+        "--no-readdirplus",
+        dest="readdirplus",
+        action="store_false",
+        default=True,
+        help="Disable readdirplus optimization",
+    )
+    parser_virtiofs_start.set_defaults(func=cmd_virtiofs.cmd_virtiofs_start)
+
+    # virtiofs stop
+    parser_virtiofs_stop = virtiofs_subparsers.add_parser(
+        "stop", help="Stop virtiofsd for a VM"
+    )
+    virtiofs_stop_name = parser_virtiofs_stop.add_argument("name", help="VM name")
+    if ARGCOMPLETE_AVAILABLE:
+        virtiofs_stop_name.completer = complete_vm_name
+    parser_virtiofs_stop.add_argument(
+        "--force", "-f", action="store_true", help="Force kill virtiofsd"
+    )
+    parser_virtiofs_stop.set_defaults(func=cmd_virtiofs.cmd_virtiofs_stop)
+
+    # virtiofs status
+    parser_virtiofs_status = virtiofs_subparsers.add_parser(
+        "status", help="Show virtiofsd status"
+    )
+    virtiofs_status_name = parser_virtiofs_status.add_argument(
+        "name", nargs="?", help="VM name (optional, shows all if omitted)"
+    )
+    if ARGCOMPLETE_AVAILABLE:
+        virtiofs_status_name.completer = complete_vm_name
+    parser_virtiofs_status.set_defaults(func=cmd_virtiofs.cmd_virtiofs_status)
+
+    # virtiofs restart
+    parser_virtiofs_restart = virtiofs_subparsers.add_parser(
+        "restart", help="Restart virtiofsd for a VM"
+    )
+    virtiofs_restart_name = parser_virtiofs_restart.add_argument("name", help="VM name")
+    if ARGCOMPLETE_AVAILABLE:
+        virtiofs_restart_name.completer = complete_vm_name
+    parser_virtiofs_restart.set_defaults(func=cmd_virtiofs.cmd_virtiofs_restart)
 
     return parser
 

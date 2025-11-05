@@ -14,7 +14,7 @@ DEFAULT_TEMPLATES: List[Dict[str, Any]] = [
         "boot": "hd",
         "description": "Ubuntu 16.04 LTS (Xenial Xerus) [EOL]",
         "cloud_image_support": True,
-        "cloud_image_url": "https://cloud-images.ubuntu.com/xenial/current/xenial-server-cloudimg-amd64-disk1.img",
+        "cloud_image_url": "https://mirrors.tuna.tsinghua.edu.cn/ubuntu-cloud-images/xenial/current/xenial-server-cloudimg-amd64-disk1.img",
     },
     {
         "name": "ubuntu-18.04",
@@ -26,7 +26,7 @@ DEFAULT_TEMPLATES: List[Dict[str, Any]] = [
         "boot": "hd",
         "description": "Ubuntu 18.04 LTS (Bionic Beaver)",
         "cloud_image_support": True,
-        "cloud_image_url": "https://cloud-images.ubuntu.com/bionic/current/bionic-server-cloudimg-amd64.img",
+        "cloud_image_url": "https://mirrors.tuna.tsinghua.edu.cn/ubuntu-cloud-images/bionic/current/bionic-server-cloudimg-amd64.img",
     },
     {
         "name": "ubuntu-20.04",
@@ -38,7 +38,7 @@ DEFAULT_TEMPLATES: List[Dict[str, Any]] = [
         "boot": "hd",
         "description": "Ubuntu 20.04 LTS (Focal Fossa)",
         "cloud_image_support": True,
-        "cloud_image_url": "https://cloud-images.ubuntu.com/focal/current/focal-server-cloudimg-amd64.img",
+        "cloud_image_url": "https://mirrors.tuna.tsinghua.edu.cn/ubuntu-cloud-images/focal/current/focal-server-cloudimg-amd64.img",
     },
     {
         "name": "ubuntu-22.04",
@@ -50,7 +50,7 @@ DEFAULT_TEMPLATES: List[Dict[str, Any]] = [
         "boot": "hd",
         "description": "Ubuntu 22.04 LTS (Jammy Jellyfish)",
         "cloud_image_support": True,
-        "cloud_image_url": "https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img",
+        "cloud_image_url": "https://mirrors.tuna.tsinghua.edu.cn/ubuntu-cloud-images/jammy/current/jammy-server-cloudimg-amd64.img",
     },
     {
         "name": "ubuntu-24.04",
@@ -62,7 +62,7 @@ DEFAULT_TEMPLATES: List[Dict[str, Any]] = [
         "boot": "hd",
         "description": "Ubuntu 24.04 LTS (Noble Numbat)",
         "cloud_image_support": True,
-        "cloud_image_url": "https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img",
+        "cloud_image_url": "https://mirrors.tuna.tsinghua.edu.cn/ubuntu-cloud-images/noble/current/noble-server-cloudimg-amd64.img",
     },
     {
         "name": "debian-10",

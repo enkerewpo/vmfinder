@@ -207,6 +207,60 @@ def cmd_vm_set_password(args):
 
         # Start VM if requested
         if args.start:
+            # Check for virtio-fs devices and start virtiofsd if needed
+            with VMManager(uri) as manager:
+                virtiofs_devices = manager.list_virtiofs_devices(args.name)
+
+                if virtiofs_devices:
+                    from vmfinder.virtiofsd import VirtiofsdManager
+
+                    virtiofs_manager = VirtiofsdManager(config.config_dir)
+
+                    # Check if virtiofsd is already running
+                    if not virtiofs_manager.is_running(args.name):
+                        # Get source path from state
+                        status = virtiofs_manager.get_status(args.name)
+                        if status:
+                            source_path = Path(status.get("source_path", ""))
+                            mount_tag = status.get("mount_tag", "shared")
+
+                            if source_path.exists():
+                                logger.info(
+                                    f"Starting virtiofsd for VM '{args.name}'..."
+                                )
+                                virtiofs_manager.start_virtiofsd(
+                                    vm_name=args.name,
+                                    source_path=source_path,
+                                    mount_tag=mount_tag,
+                                )
+                            else:
+                                logger.error(
+                                    f"virtio-fs source path not found: {source_path}. "
+                                    f"Cannot start virtiofsd."
+                                )
+                                logger.error(
+                                    f"Please start virtiofsd manually with: "
+                                    f"vmfinder virtiofs start {args.name} <source_path>"
+                                )
+                                sys.exit(1)
+                        else:
+                            # State not found - need to start manually
+                            socket_path = virtiofs_devices[0].get("socket_path", "")
+                            logger.error(
+                                f"virtio-fs configured but virtiofsd state not found. "
+                                f"Cannot start VM without virtiofsd running."
+                            )
+                            logger.error(
+                                f"\nPlease start virtiofsd manually with:"
+                                f"\n  vmfinder virtiofs start {args.name} <source_directory_path>"
+                            )
+                            if socket_path:
+                                logger.error(f"\nExpected socket path: {socket_path}")
+                            logger.error(
+                                f"\nThen run this command again: vmfinder vm set-password {args.name}"
+                            )
+                            sys.exit(1)
+
             logger.info(f"Starting VM '{args.name}'...")
             with VMManager(uri) as manager:
                 manager.start_vm(args.name)

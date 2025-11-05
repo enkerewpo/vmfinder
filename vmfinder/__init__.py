@@ -1,6 +1,6 @@
 """VMFinder - A libvirt-based VM management tool for paper reproduction."""
 
-__version__ = "0.1.1"
+__version__ = "0.2.0"
 __author__ = "wheatfox"
 __author_email__ = "wheatfox17@icloud.com"
 __url__ = "https://github.com/enkerewpo/vmfinder"

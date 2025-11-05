@@ -13,6 +13,7 @@ from vmfinder.template import TemplateManager
 from vmfinder.disk import DiskManager
 from vmfinder.cloud_image import CloudImageManager
 from vmfinder.cloud_init import CloudInitManager
+from vmfinder.virtiofsd import VirtiofsdManager
 from vmfinder.logger import get_logger
 
 logger = get_logger()
@@ -127,11 +128,54 @@ def cmd_vm_create(args):
             if not args.auto_install:
                 print("Note: You'll need to manually install an OS on this disk.")
 
+        # Handle virtio-fs mounts if specified
+        virtiofs_mounts = None
+        if hasattr(args, "virtiofs") and args.virtiofs:
+            virtiofs_manager = VirtiofsdManager(config.config_dir)
+
+            # Parse virtiofs mount specification
+            # Format: source_path[:mount_tag]
+            source_path = Path(args.virtiofs)
+            mount_tag = getattr(args, "virtiofs_tag", "shared")
+
+            if not source_path.exists():
+                raise ValueError(f"virtio-fs source path does not exist: {source_path}")
+            if not source_path.is_dir():
+                raise ValueError(
+                    f"virtio-fs source path is not a directory: {source_path}"
+                )
+
+            # Get socket path from virtiofsd manager
+            socket_path = virtiofs_manager._get_socket_path(args.name)
+
+            # Start virtiofsd daemon
+            logger.info(f"Starting virtiofsd for VM '{args.name}'...")
+            virtiofs_manager.start_virtiofsd(
+                vm_name=args.name,
+                source_path=source_path,
+                mount_tag=mount_tag,
+            )
+
+            # Prepare mount config for VM XML
+            virtiofs_mounts = [
+                {
+                    "socket_path": socket_path,
+                    "mount_tag": mount_tag,
+                    "source": str(source_path),
+                }
+            ]
+
         # Create VM
         logger.info(f"Creating VM '{args.name}' with template '{args.template}'...")
         with VMManager(uri) as manager:
             manager.create_vm(
-                args.name, template_data, disk_path, args.cpu, args.memory, args.network
+                args.name,
+                template_data,
+                disk_path,
+                args.cpu,
+                args.memory,
+                args.network,
+                virtiofs_mounts=virtiofs_mounts,
             )
 
         # If using cloud image, create and attach cloud-init ISO
