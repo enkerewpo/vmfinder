@@ -42,7 +42,7 @@ def cmd_vm_console(args):
 
 
 def cmd_vm_ssh(args):
-    """Show SSH connection information for a VM."""
+    """Connect to a VM via SSH."""
     config = Config()
     uri = config.get("libvirt_uri", "qemu:///system")
 
@@ -93,32 +93,36 @@ def cmd_vm_ssh(args):
             # Use the first IPv4 address
             ip_addr = ipv4_addresses[0]["ip"]
 
+            # Check if ssh command exists
+            ssh_path = shutil.which("ssh")
+            if not ssh_path:
+                logger.error("ssh command not found. Please install OpenSSH client.")
+                sys.exit(1)
+
             # Build SSH command
-            ssh_cmd_parts = ["ssh"]
+            ssh_cmd_parts = [ssh_path]
             if args.key:
                 ssh_cmd_parts.extend(["-i", args.key])
             if args.port != 22:
                 ssh_cmd_parts.extend(["-p", str(args.port)])
             ssh_cmd_parts.append(f"{args.username}@{ip_addr}")
-            ssh_cmd = " ".join(ssh_cmd_parts)
 
-            print(f"\nSSH connection information for VM '{args.name}':")
-            print(f"  IP Address: {ip_addr}")
-            print(f"  Username: {args.username}")
-            print(f"  Port: {args.port}")
+            # Log connection info
+            logger.info(f"Connecting to VM '{args.name}' via SSH:")
+            logger.info(f"  IP Address: {ip_addr}")
+            logger.info(f"  Username: {args.username}")
+            logger.info(f"  Port: {args.port}")
 
             if len(ipv4_addresses) > 1:
-                print(f"\nOther IP addresses:")
+                logger.info(f"Other IP addresses available:")
                 for ip_info in ipv4_addresses[1:]:
-                    print(
+                    logger.info(
                         f"  - {ip_info['ip']} ({ip_info.get('interface', 'unknown')})"
                     )
 
-            print(f"\nTo connect via SSH, run:")
-            print(f"  {ssh_cmd}")
-
-            print(f"\nOr use the console (no IP needed):")
-            print(f"  vmfinder vm console {args.name}")
+            # Execute SSH command directly
+            # Use os.execv to replace the current process with ssh
+            os.execv(ssh_path, ssh_cmd_parts)
 
     except Exception as e:
         logger.error(f"Error: {e}")

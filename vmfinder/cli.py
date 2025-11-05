@@ -413,9 +413,7 @@ def create_parser():
     parser_vm_set_password.set_defaults(func=cmd_vm_set_password)
 
     # vm ssh
-    parser_vm_ssh = vm_subparsers.add_parser(
-        "ssh", help="Show SSH connection information for a VM"
-    )
+    parser_vm_ssh = vm_subparsers.add_parser("ssh", help="Connect to a VM via SSH")
     vm_ssh_name = parser_vm_ssh.add_argument("name", help="VM name")
     if ARGCOMPLETE_AVAILABLE:
         vm_ssh_name.completer = complete_vm_name
