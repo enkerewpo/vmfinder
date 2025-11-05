@@ -4,6 +4,8 @@ import sys
 import os
 import shutil
 import getpass
+import time
+import shlex
 from pathlib import Path
 
 from vmfinder.config import Config
@@ -16,7 +18,7 @@ logger = get_logger()
 
 
 def cmd_vm_console(args):
-    """Show console command for a virtual machine."""
+    """Connect to console for a virtual machine."""
     config = Config()
     uri = config.get("libvirt_uri", "qemu:///system")
 
@@ -24,18 +26,47 @@ def cmd_vm_console(args):
         with VMManager(uri) as manager:
             console_cmd = manager.get_console(args.name)
             if console_cmd:
-                print(f"To connect to console, run:")
-                print(f"  {console_cmd}")
-                print("\nTo exit console, press: Ctrl+]")
-                print(
-                    "\nNote: If the VM doesn't have console configured, you can also use:"
-                )
-                print(
-                    f"  virsh -c {uri} vncdisplay {args.name}  # View VNC display info"
-                )
+                # Print help information
+                print("To exit console, press: Ctrl+]")
+                print(f"\nConnecting to console in 2 seconds...")
+                sys.stdout.flush()
+
+                # Wait 2 seconds
+                time.sleep(2)
+
+                # Parse and execute the console command
+                cmd_parts = shlex.split(console_cmd)
+                virsh_path = shutil.which("virsh")
+                if not virsh_path:
+                    logger.error(
+                        "virsh command not found. Please install libvirt-client."
+                    )
+                    sys.exit(1)
+
+                # Replace 'virsh' with full path
+                cmd_parts[0] = virsh_path
+
+                # Clean up logging handlers to prevent interference with console terminal
+                import logging
+
+                root_logger = logging.getLogger("vmfinder")
+                for handler in root_logger.handlers[:]:
+                    if (
+                        isinstance(handler, logging.StreamHandler)
+                        and handler.stream == sys.stdout
+                    ):
+                        root_logger.removeHandler(handler)
+
+                # Flush all streams to ensure clean terminal state before exec
+                sys.stdout.flush()
+                sys.stderr.flush()
+
+                # Execute console command directly
+                os.execve(virsh_path, cmd_parts, os.environ)
             else:
                 print("Console not available for this VM.")
                 print(f"Try: virsh -c {uri} vncdisplay {args.name}")
+                sys.exit(1)
     except Exception as e:
         logger.error(f"Error: {e}")
         sys.exit(1)
@@ -100,29 +131,41 @@ def cmd_vm_ssh(args):
                 sys.exit(1)
 
             # Build SSH command
-            ssh_cmd_parts = [ssh_path]
+            # Use -t to force pseudo-terminal allocation (required for mouse and scroll support)
+            ssh_cmd_parts = [ssh_path, "-t"]
             if args.key:
                 ssh_cmd_parts.extend(["-i", args.key])
             if args.port != 22:
                 ssh_cmd_parts.extend(["-p", str(args.port)])
             ssh_cmd_parts.append(f"{args.username}@{ip_addr}")
 
-            # Log connection info
-            logger.info(f"Connecting to VM '{args.name}' via SSH:")
-            logger.info(f"  IP Address: {ip_addr}")
-            logger.info(f"  Username: {args.username}")
-            logger.info(f"  Port: {args.port}")
+            # Clean up logging handlers to prevent interference with SSH terminal
+            # Remove all stdout handlers to avoid ANSI escape sequences interfering
+            import logging
 
-            if len(ipv4_addresses) > 1:
-                logger.info(f"Other IP addresses available:")
-                for ip_info in ipv4_addresses[1:]:
-                    logger.info(
-                        f"  - {ip_info['ip']} ({ip_info.get('interface', 'unknown')})"
-                    )
+            root_logger = logging.getLogger("vmfinder")
+            for handler in root_logger.handlers[:]:
+                if (
+                    isinstance(handler, logging.StreamHandler)
+                    and handler.stream == sys.stdout
+                ):
+                    root_logger.removeHandler(handler)
+
+            # Output brief connection info to stderr (won't interfere with SSH)
+            print(
+                f"Connecting to {args.username}@{ip_addr}...",
+                file=sys.stderr,
+                flush=True,
+            )
+
+            # Flush all streams to ensure clean terminal state before exec
+            sys.stdout.flush()
+            sys.stderr.flush()
 
             # Execute SSH command directly
-            # Use os.execv to replace the current process with ssh
-            os.execv(ssh_path, ssh_cmd_parts)
+            # Use os.execve to replace the current process with ssh, preserving environment
+            # This ensures SSH gets clean stdin/stdout/stderr without interference
+            os.execve(ssh_path, ssh_cmd_parts, os.environ)
 
     except Exception as e:
         logger.error(f"Error: {e}")
