@@ -61,6 +61,102 @@ class VirtiofsdManager:
 
         return None
 
+    def _find_processes_by_socket(self, socket_path: str) -> List[int]:
+        """Find all virtiofsd processes using the specified socket path.
+        
+        Args:
+            socket_path: Socket path to search for
+            
+        Returns:
+            List of PIDs using this socket
+        """
+        pids = []
+        try:
+            # Use ps to find all virtiofsd processes
+            result = subprocess.run(
+                ["ps", "aux"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            
+            if result.returncode == 0:
+                for line in result.stdout.splitlines():
+                    if "virtiofsd" in line and socket_path in line:
+                        # Extract PID (second column in ps aux output)
+                        parts = line.split()
+                        if len(parts) > 1:
+                            try:
+                                pid = int(parts[1])
+                                pids.append(pid)
+                            except (ValueError, IndexError):
+                                continue
+        except Exception:
+            # If ps fails, try using pgrep
+            try:
+                result = subprocess.run(
+                    ["pgrep", "-f", f"virtiofsd.*{socket_path}"],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                if result.returncode == 0:
+                    for pid_str in result.stdout.strip().split():
+                        try:
+                            pids.append(int(pid_str))
+                        except ValueError:
+                            continue
+            except Exception:
+                pass
+        
+        return pids
+
+    def _kill_processes_by_socket(self, socket_path: str, force: bool = False) -> int:
+        """Kill all virtiofsd processes using the specified socket path.
+        
+        Args:
+            socket_path: Socket path to search for
+            force: Force kill if graceful shutdown fails
+            
+        Returns:
+            Number of processes killed
+        """
+        pids = self._find_processes_by_socket(socket_path)
+        killed = 0
+        
+        for pid in pids:
+            try:
+                # Try graceful shutdown first
+                os.kill(pid, signal.SIGTERM)
+                
+                # Wait for process to terminate (max 2 seconds)
+                import time
+                for _ in range(20):  # 20 * 0.1 = 2 seconds
+                    try:
+                        os.kill(pid, 0)
+                    except ProcessLookupError:
+                        # Process terminated
+                        killed += 1
+                        break
+                    time.sleep(0.1)
+                else:
+                    # Process still running, force kill if requested
+                    if force:
+                        try:
+                            os.kill(pid, signal.SIGKILL)
+                            time.sleep(0.2)
+                            try:
+                                os.kill(pid, 0)
+                            except ProcessLookupError:
+                                killed += 1
+                        except (ProcessLookupError, PermissionError):
+                            pass
+            except (ProcessLookupError, PermissionError):
+                # Process already dead or no permission
+                pass
+        
+        return killed
+
     def start_virtiofsd(
         self,
         vm_name: str,
@@ -83,7 +179,35 @@ class VirtiofsdManager:
         Returns:
             True if started successfully, False otherwise
         """
-        # Check if already running
+        # Get socket path first (needed for cleanup)
+        socket_path = self._get_socket_path(vm_name)
+        socket_path_obj = Path(socket_path)
+        
+        # Check if socket file exists and is being used by another process
+        if socket_path_obj.exists():
+            # Check if there are any processes using this socket
+            pids = self._find_processes_by_socket(socket_path)
+            if pids:
+                logger.warning(
+                    f"Found {len(pids)} existing virtiofsd process(es) using socket "
+                    f"'{socket_path}'. Cleaning up..."
+                )
+                killed = self._kill_processes_by_socket(socket_path, force=True)
+                if killed > 0:
+                    logger.info(f"Killed {killed} stale virtiofsd process(es)")
+                
+                # Wait a bit for socket to be released
+                import time
+                time.sleep(0.5)
+                
+                # Remove stale socket file if it still exists
+                if socket_path_obj.exists():
+                    try:
+                        socket_path_obj.unlink()
+                    except Exception:
+                        pass
+        
+        # Check if already running (by state file)
         if self.is_running(vm_name):
             logger.warning(f"virtiofsd for VM '{vm_name}' is already running")
             return False
@@ -100,9 +224,6 @@ class VirtiofsdManager:
             raise RuntimeError(
                 "virtiofsd binary not found. Please install qemu-virtiofsd or virtiofsd package."
             )
-
-        # Get socket path
-        socket_path = self._get_socket_path(vm_name)
 
         # Prepare command - only include supported options
         # Some virtiofsd versions don't support --cache or --xattr with "auto" value
@@ -133,7 +254,6 @@ class VirtiofsdManager:
             log_file = self.state_dir / f"{vm_name}.log"
 
             # Ensure socket directory exists and has correct permissions
-            socket_path_obj = Path(socket_path)
             socket_dir = socket_path_obj.parent
             socket_dir.mkdir(parents=True, exist_ok=True)
 
@@ -252,85 +372,132 @@ class VirtiofsdManager:
         """
         state_file = self._get_state_file(vm_name)
 
-        if not state_file.exists():
-            logger.warning(f"No virtiofsd state found for VM '{vm_name}'")
-            return False
+        socket_path = None
+        pid = None
+        
+        if state_file.exists():
+            try:
+                with open(state_file, "r") as f:
+                    state = json.load(f)
+                socket_path = state.get("socket_path")
+                pid = state.get("pid")
+            except Exception:
+                pass
 
-        try:
-            with open(state_file, "r") as f:
-                state = json.load(f)
-
-            pid = state.get("pid")
-            if not pid:
-                logger.warning(f"No PID found in state for VM '{vm_name}'")
-                # Keep state file even if PID is missing - might have source_path info
-                # state_file.unlink()
-                return False
-
-            # Check if process is still running
+        # First, try to stop by PID if we have it
+        if pid:
             try:
                 os.kill(pid, 0)  # Check if process exists
             except ProcessLookupError:
                 # Process already dead
-                logger.info(f"virtiofsd for VM '{vm_name}' is not running")
-                # Keep state file for restart - don't delete it
-                # state_file.unlink()
-                return True
+                pid = None
             except PermissionError:
                 # Process exists but we don't have permission
                 logger.warning(
                     f"Cannot access virtiofsd process for VM '{vm_name}' "
                     f"(PID: {pid}). May need root privileges."
                 )
-                return False
+                pid = None
 
-            # Try graceful shutdown first
-            try:
-                os.kill(pid, signal.SIGTERM)
+        # Also clean up all processes using the socket (in case there are duplicates)
+        socket_stopped = False
+        if socket_path:
+            pids_by_socket = self._find_processes_by_socket(socket_path)
+            if pids_by_socket:
+                logger.info(
+                    f"Found {len(pids_by_socket)} virtiofsd process(es) using socket "
+                    f"'{socket_path}'. Stopping all..."
+                )
+                killed = self._kill_processes_by_socket(socket_path, force=force)
+                if killed > 0:
+                    logger.info(f"✓ Stopped {killed} virtiofsd process(es) for VM '{vm_name}'")
+                    socket_stopped = True
+                    
+                    # Remove socket file if it exists
+                    socket_path_obj = Path(socket_path)
+                    if socket_path_obj.exists():
+                        try:
+                            socket_path_obj.unlink()
+                        except Exception:
+                            pass
 
-                # Wait for process to terminate (max 5 seconds)
-                import time
+        if not state_file.exists():
+            if socket_stopped:
+                return True
+            logger.warning(f"No virtiofsd state found for VM '{vm_name}'")
+            return False
 
-                for _ in range(50):  # 50 * 0.1 = 5 seconds
+        if not pid:
+            if socket_stopped:
+                return True
+            logger.info(f"virtiofsd for VM '{vm_name}' is not running")
+            return True
+
+        # Try graceful shutdown first
+        try:
+            os.kill(pid, signal.SIGTERM)
+
+            # Wait for process to terminate (max 5 seconds)
+            import time
+
+            for _ in range(50):  # 50 * 0.1 = 5 seconds
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    # Process terminated
+                    logger.info(f"✓ Stopped virtiofsd for VM '{vm_name}'")
+                    # Remove socket file if it exists
+                    if socket_path:
+                        socket_path_obj = Path(socket_path)
+                        if socket_path_obj.exists():
+                            try:
+                                socket_path_obj.unlink()
+                            except Exception:
+                                pass
+                    return True
+                time.sleep(0.1)
+            else:
+                # Process still running, force kill if requested
+                if force:
+                    os.kill(pid, signal.SIGKILL)
+                    time.sleep(0.2)
                     try:
                         os.kill(pid, 0)
                     except ProcessLookupError:
-                        # Process terminated
-                        break
-                    time.sleep(0.1)
-                else:
-                    # Process still running, force kill if requested
-                    if force:
-                        os.kill(pid, signal.SIGKILL)
-                        time.sleep(0.2)
-                        try:
-                            os.kill(pid, 0)
-                        except ProcessLookupError:
-                            pass
-                        else:
-                            logger.error(
-                                f"Failed to kill virtiofsd for VM '{vm_name}' (PID: {pid})"
-                            )
-                            return False
+                        logger.info(f"✓ Stopped virtiofsd for VM '{vm_name}'")
+                        # Remove socket file if it exists
+                        if socket_path:
+                            socket_path_obj = Path(socket_path)
+                            if socket_path_obj.exists():
+                                try:
+                                    socket_path_obj.unlink()
+                                except Exception:
+                                    pass
+                        return True
                     else:
-                        logger.warning(
-                            f"virtiofsd for VM '{vm_name}' did not terminate. "
-                            f"Use --force to kill it."
+                        logger.error(
+                            f"Failed to kill virtiofsd for VM '{vm_name}' (PID: {pid})"
                         )
                         return False
+                else:
+                    logger.warning(
+                        f"virtiofsd for VM '{vm_name}' did not terminate. "
+                        f"Use --force to kill it."
+                    )
+                    return False
 
-                logger.info(f"✓ Stopped virtiofsd for VM '{vm_name}'")
-                # Don't delete state file - keep it for restart
-                # state_file.unlink()
-                return True
-
-            except ProcessLookupError:
-                # Process already terminated
-                logger.info(f"virtiofsd for VM '{vm_name}' already stopped")
-                # Don't delete state file - keep it for restart
-                # state_file.unlink()
-                return True
-
+        except ProcessLookupError:
+            # Process already terminated
+            logger.info(f"virtiofsd for VM '{vm_name}' already stopped")
+            # Remove socket file if it exists
+            if socket_path:
+                socket_path_obj = Path(socket_path)
+                if socket_path_obj.exists():
+                    try:
+                        socket_path_obj.unlink()
+                    except Exception:
+                        pass
+            return True
         except Exception as e:
             logger.error(f"Failed to stop virtiofsd: {e}")
             return False
@@ -354,20 +521,27 @@ class VirtiofsdManager:
                 state = json.load(f)
 
             pid = state.get("pid")
-            if not pid:
-                return False
+            socket_path = state.get("socket_path")
+            
+            # Check if process is still running by PID
+            if pid:
+                try:
+                    os.kill(pid, 0)
+                    return True
+                except ProcessLookupError:
+                    # PID is dead, but check if socket is still in use
+                    pass
+                except PermissionError:
+                    # Process exists but we can't check (assume running)
+                    return True
 
-            # Check if process is still running
-            try:
-                os.kill(pid, 0)
-                return True
-            except ProcessLookupError:
-                # Process dead, but keep state file for potential restart
-                # state_file.unlink()
-                return False
-            except PermissionError:
-                # Process exists but we can't check (assume running)
-                return True
+            # Also check if socket is being used by any process
+            if socket_path:
+                pids = self._find_processes_by_socket(socket_path)
+                if pids:
+                    return True
+
+            return False
 
         except Exception:
             return False

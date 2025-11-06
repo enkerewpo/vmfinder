@@ -364,8 +364,19 @@ class VMManager:
         except libvirt.libvirtError as e:
             raise RuntimeError(f"Failed to start VM: {e}")
 
-    def stop_vm(self, name: str, force: bool = False) -> bool:
-        """Stop a VM."""
+    def stop_vm(self, name: str, force: bool = False, wait: bool = True, timeout: int = 30) -> bool:
+        """Stop a VM.
+        
+        Args:
+            name: VM name
+            force: Force stop (destroy) instead of graceful shutdown
+            wait: Wait for VM to actually stop (default: True)
+            timeout: Maximum seconds to wait for shutdown (default: 30)
+            
+        Returns:
+            True if stopped successfully, False if already stopped
+        """
+        import time
         conn = self.connect()
         try:
             dom = conn.lookupByName(name)
@@ -374,11 +385,185 @@ class VMManager:
 
             if force:
                 dom.destroy()
+                # Wait a bit for destroy to complete
+                if wait:
+                    for _ in range(10):  # Wait up to 1 second
+                        if not dom.isActive():
+                            return True
+                        time.sleep(0.1)
+                return True
             else:
                 dom.shutdown()
-            return True
+                # Wait for VM to actually shut down
+                if wait:
+                    for _ in range(timeout * 10):  # Check every 0.1 seconds
+                        if not dom.isActive():
+                            return True
+                        time.sleep(0.1)
+                    # Timeout - VM didn't shut down gracefully
+                    # Return False to indicate shutdown didn't complete
+                    return False
+                return True
         except libvirt.libvirtError as e:
             raise RuntimeError(f"Failed to stop VM: {e}")
+
+    def kill_vm(self, name: str) -> bool:
+        """Force kill a VM by destroying it and killing qemu process if needed.
+        
+        Args:
+            name: VM name
+            
+        Returns:
+            True if killed successfully, False if already stopped
+        """
+        import time
+        import subprocess
+        import signal
+        import os
+        
+        conn = self.connect()
+        try:
+            dom = conn.lookupByName(name)
+            if not dom.isActive():
+                return False  # Already stopped
+
+            # First try destroy
+            try:
+                dom.destroy()
+                # Wait a bit for destroy to complete
+                for _ in range(20):  # Wait up to 2 seconds
+                    if not dom.isActive():
+                        return True
+                    time.sleep(0.1)
+            except Exception:
+                pass
+
+            # If still running, find and kill qemu process
+            if dom.isActive():
+                # Try to get PID from libvirt first
+                try:
+                    pid = dom.ID()  # This returns the hypervisor ID, not the PID
+                    # Try to get the actual PID from domain info
+                    info = dom.info()
+                    if info and len(info) > 0:
+                        # Domain info doesn't directly give PID, so we'll search by name/UUID
+                        pass
+                except Exception:
+                    pass
+                
+                # Get VM UUID and name to find qemu process
+                try:
+                    uuid = dom.UUIDString()
+                    # Find qemu process for this VM using pgrep or ps
+                    # Try pgrep first (more reliable)
+                    try:
+                        # Search for qemu processes with VM name
+                        result = subprocess.run(
+                            ["pgrep", "-f", f"qemu.*{name}"],
+                            capture_output=True,
+                            text=True,
+                            check=False,
+                        )
+                        pids = []
+                        if result.returncode == 0 and result.stdout.strip():
+                            for pid_str in result.stdout.strip().split():
+                                try:
+                                    pids.append(int(pid_str))
+                                except ValueError:
+                                    continue
+                        
+                        # If not found, try searching by UUID
+                        if not pids:
+                            result = subprocess.run(
+                                ["pgrep", "-f", uuid],
+                                capture_output=True,
+                                text=True,
+                                check=False,
+                            )
+                            if result.returncode == 0 and result.stdout.strip():
+                                for pid_str in result.stdout.strip().split():
+                                    try:
+                                        pids.append(int(pid_str))
+                                    except ValueError:
+                                        continue
+                        
+                        # Kill all found qemu processes
+                        killed_any = False
+                        for pid in pids:
+                            try:
+                                # Verify it's a qemu process
+                                proc_file = f"/proc/{pid}/comm"
+                                try:
+                                    with open(proc_file, "r") as f:
+                                        comm = f.read().strip()
+                                        if "qemu" not in comm.lower():
+                                            continue
+                                except Exception:
+                                    pass
+                                
+                                os.kill(pid, signal.SIGKILL)
+                                time.sleep(0.2)
+                                # Check if process is dead
+                                try:
+                                    os.kill(pid, 0)
+                                except ProcessLookupError:
+                                    # Process killed
+                                    logger.info(f"Killed qemu process (PID: {pid}) for VM '{name}'")
+                                    killed_any = True
+                            except (ProcessLookupError, PermissionError) as e:
+                                logger.warning(f"Failed to kill qemu process {pid}: {e}")
+                        
+                        if killed_any:
+                            # Wait a bit and check if VM is stopped
+                            time.sleep(0.5)
+                            if not dom.isActive():
+                                return True
+                    except FileNotFoundError:
+                        # pgrep not available, fall back to ps
+                        result = subprocess.run(
+                            ["ps", "aux"],
+                            capture_output=True,
+                            text=True,
+                            check=False,
+                        )
+                        
+                        if result.returncode == 0:
+                            for line in result.stdout.splitlines():
+                                # Look for qemu process with VM name or UUID
+                                if ("qemu" in line.lower() and 
+                                    (name in line or uuid in line)):
+                                    parts = line.split()
+                                    if len(parts) > 1:
+                                        try:
+                                            pid = int(parts[1])
+                                            # Kill the process
+                                            try:
+                                                os.kill(pid, signal.SIGKILL)
+                                                time.sleep(0.2)
+                                                # Check if process is dead
+                                                try:
+                                                    os.kill(pid, 0)
+                                                except ProcessLookupError:
+                                                    # Process killed
+                                                    logger.info(f"Killed qemu process (PID: {pid}) for VM '{name}'")
+                                                    time.sleep(0.5)
+                                                    if not dom.isActive():
+                                                        return True
+                                            except (ProcessLookupError, PermissionError) as e:
+                                                logger.warning(f"Failed to kill qemu process {pid}: {e}")
+                                        except (ValueError, IndexError):
+                                            continue
+                except Exception as e:
+                    logger.warning(f"Failed to find qemu process: {e}")
+
+            # Final check
+            if not dom.isActive():
+                return True
+            else:
+                raise RuntimeError(f"Failed to kill VM '{name}'")
+                
+        except libvirt.libvirtError as e:
+            raise RuntimeError(f"Failed to kill VM: {e}")
 
     def suspend_vm(self, name: str) -> bool:
         """Suspend a VM."""

@@ -134,17 +134,76 @@ def cmd_vm_stop(args):
     try:
         # Stop the VM first
         with VMManager(uri) as manager:
-            if manager.stop_vm(args.name, args.force):
-                action = "destroyed" if args.force else "stopped"
-                logger.info(f"✓ {action.capitalize()} VM: {args.name}")
-            else:
+            # Check if VM is running first
+            info = manager.get_vm_info(args.name)
+            if not info:
+                logger.error(f"VM '{args.name}' not found.")
+                sys.exit(1)
+            
+            if info["state"] != "running":
                 logger.warning(f"VM {args.name} is already stopped.")
+            else:
+                # Use kill mode if requested
+                if getattr(args, 'kill', False):
+                    logger.info(f"Force killing VM '{args.name}'...")
+                    killed = manager.kill_vm(args.name)
+                    if killed:
+                        logger.info(f"✓ Killed VM: {args.name}")
+                    else:
+                        logger.warning(f"VM {args.name} is already stopped.")
+                else:
+                    stopped = manager.stop_vm(args.name, args.force)
+                    if stopped:
+                        action = "destroyed" if args.force else "stopped"
+                        logger.info(f"✓ {action.capitalize()} VM: {args.name}")
+                    else:
+                        # Check if VM is still running (shutdown timeout)
+                        current_info = manager.get_vm_info(args.name)
+                        if current_info and current_info["state"] == "running":
+                            # If graceful shutdown failed, try force stop
+                            if not args.force:
+                                logger.warning(
+                                    f"VM '{args.name}' did not shut down gracefully. "
+                                    f"Attempting force stop..."
+                                )
+                                stopped = manager.stop_vm(args.name, force=True)
+                                if stopped:
+                                    logger.info(f"✓ Destroyed VM: {args.name}")
+                                else:
+                                    # Last resort: kill
+                                    logger.warning(
+                                        f"Force stop failed. Attempting kill..."
+                                    )
+                                    killed = manager.kill_vm(args.name)
+                                    if killed:
+                                        logger.info(f"✓ Killed VM: {args.name}")
+                                    else:
+                                        logger.error(f"Failed to stop VM: {args.name}")
+                                        sys.exit(1)
+                            else:
+                                # Force already tried, use kill
+                                logger.warning(
+                                    f"Force stop failed. Attempting kill..."
+                                )
+                                killed = manager.kill_vm(args.name)
+                                if killed:
+                                    logger.info(f"✓ Killed VM: {args.name}")
+                                else:
+                                    logger.error(f"Failed to stop VM: {args.name}")
+                                    sys.exit(1)
+                        else:
+                            # VM actually stopped, just took a while
+                            logger.info(f"✓ Stopped VM: {args.name}")
 
         # Stop virtiofsd if it's running
         virtiofs_manager = VirtiofsdManager(config.config_dir)
         if virtiofs_manager.is_running(args.name):
             logger.info(f"Stopping virtiofsd for VM '{args.name}'...")
-            virtiofs_manager.stop_virtiofsd(args.name, force=args.force)
+            # Use kill mode for virtiofsd too if kill was requested
+            virtiofs_manager.stop_virtiofsd(
+                args.name, 
+                force=getattr(args, 'kill', False) or args.force
+            )
 
     except Exception as e:
         logger.error(f"Error: {e}")

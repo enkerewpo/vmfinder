@@ -279,6 +279,10 @@ def create_parser():
     parser_vm_stop.add_argument(
         "--force", "-f", action="store_true", help="Force stop (destroy)"
     )
+    parser_vm_stop.add_argument(
+        "--kill", "-k", action="store_true", 
+        help="Force kill VM immediately (skip graceful shutdown, kill qemu process if needed)"
+    )
     parser_vm_stop.set_defaults(func=cmd_vm_stop)
 
     # vm suspend
